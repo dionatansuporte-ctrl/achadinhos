@@ -103,12 +103,12 @@ if !tentativas! geq 45 (
 goto espera_api
 :api_ok
 echo   API no ar.
-start "" "http://localhost:5173"
+start "" "http://127.0.0.1:8080"
 
 :fim
 echo.
 echo ==========================================================
-echo   Pronto. Painel: http://localhost:5173
+echo   Pronto. Painel: http://127.0.0.1:8080
 echo   Para parar tudo: OfertasDaHora.bat, opcao Parar
 echo ==========================================================
 ping -n 11 127.0.0.1 >nul

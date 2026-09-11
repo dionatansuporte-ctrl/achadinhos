@@ -29,7 +29,8 @@ import { extractMercadoLivreItemId, fetchMercadoLivreItem } from './services/mer
 import { trendingKeywords } from './integrations/mercadolivre-search';
 
 const app = express();
-app.use(cors({ origin: process.env.WEB_URL || 'http://localhost:5173' }));
+const webUrl=process.env.WEB_URL||'http://127.0.0.1:8080';
+app.use(cors({ origin: [webUrl, webUrl.replace('127.0.0.1','localhost'), webUrl.replace('localhost','127.0.0.1')] }));
 app.use(express.json({ limit: '1mb' }));
 
 // Preços digitados em português usam vírgula decimal ("5,69"); Number() sozinho devolveria NaN.
@@ -64,7 +65,7 @@ app.post('/api/auth/register', asyncRoute(async (req:any,res:any)=>{
   try{
     if(await isMailConfigured()){
       const admins=await prisma.user.findMany({where:{role:{in:['MASTER','ADMIN']},status:'ACTIVE'},select:{email:true}});
-      const link=`${process.env.WEB_URL||'http://localhost:5173'}/users`;
+      const link=`${process.env.WEB_URL||'http://127.0.0.1:8080'}/users`;
       await Promise.all(admins.map(a=>sendMail(a.email,'Novo cadastro aguardando aprovação · OfertasDaHora',`${user.name} (${user.email}) pediu acesso ao OfertasDaHora.\n\nAprove ou recuse em: ${link}`).catch(()=>{})));
     }
   }catch{ /* e-mail é só aviso */ }
@@ -104,7 +105,7 @@ app.patch('/api/users/:id', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const updated=await prisma.user.update({where:{id:target.id},data,select:{id:true,name:true,email:true,role:true,status:true,approvedAt:true,createdAt:true}});
   if(body.status && body.status!=='ACTIVE') await prisma.session.deleteMany({where:{userId:target.id}}); // derruba quem foi bloqueado
   if(body.status==='ACTIVE' && target.status==='PENDING'){
-    try{ if(await isMailConfigured()) await sendMail(target.email,'Seu acesso foi aprovado · OfertasDaHora',`Olá${target.name?`, ${target.name}`:''}! Seu cadastro no OfertasDaHora foi aprovado.\n\nEntre em: ${process.env.WEB_URL||'http://localhost:5173'}`); }catch{ /* aviso opcional */ }
+    try{ if(await isMailConfigured()) await sendMail(target.email,'Seu acesso foi aprovado · OfertasDaHora',`Olá${target.name?`, ${target.name}`:''}! Seu cadastro no OfertasDaHora foi aprovado.\n\nEntre em: ${process.env.WEB_URL||'http://127.0.0.1:8080'}`); }catch{ /* aviso opcional */ }
   }
   res.json(updated);
 }));

@@ -25,7 +25,7 @@ If Not JaRodando() Then
 End If
 
 ' Aviso discreto na bandeja (some sozinho). Nao bloqueia.
-sh.Popup "OfertasDaHora esta rodando em segundo plano." & vbCrLf & "Painel: http://localhost:5173" & vbCrLf & "Para parar, use OfertasDaHora.bat.", 6, "OfertasDaHora", 64
+sh.Popup "OfertasDaHora esta rodando em segundo plano." & vbCrLf & "Painel: http://127.0.0.1:8080" & vbCrLf & "Para parar, use OfertasDaHora.bat.", 6, "OfertasDaHora", 64
 
 Function JaRodando()
   Dim wmi, procs, p

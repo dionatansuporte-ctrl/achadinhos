@@ -84,7 +84,7 @@ npm install
 npm run dev
 ```
 
-Frontend: `http://localhost:5173`
+Frontend: `http://127.0.0.1:8080`
 
 Se a API estiver em outro endereço, crie `apps/web/.env`:
 

@@ -75,7 +75,7 @@ cd /d "%ROOT%"
 cscript //nologo "%ROOT%\tools\iniciar-oculto.vbs"
 echo.
 echo ================================================================
-echo   Restaurado! Painel: http://localhost:5173
+echo   Restaurado! Painel: http://127.0.0.1:8080
 echo   Se o WhatsApp pedir QR de novo, escaneie em Canais.
 echo ================================================================
 pause
