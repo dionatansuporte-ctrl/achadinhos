@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+.wa-auth/
+logs/
+backups/
+certs/
+tools/cloudflared.exe
+tools/cloudflared.log
+apps/api/ml-redirect.txt
+tsconfig.tsbuildinfo

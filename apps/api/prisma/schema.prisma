@@ -1,0 +1,261 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Marketplace {
+  SHOPEE
+  MERCADO_LIVRE
+}
+enum ChannelType {
+  WHATSAPP
+  WHATSAPP_GROUP
+  INSTAGRAM
+}
+enum AutomationStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+}
+enum JobStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
+enum UserRole {
+  MASTER
+  ADMIN
+  OPERATOR
+}
+
+// Cadastro novo nasce PENDING e só entra depois que um administrador aprova.
+enum UserStatus {
+  PENDING
+  ACTIVE
+  BLOCKED
+}
+
+model User {
+  id           String              @id @default(cuid())
+  email        String              @unique
+  name         String?
+  passwordHash String?
+  role         UserRole            @default(ADMIN)
+  status       UserStatus          @default(ACTIVE)
+  approvedAt   DateTime?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  accounts     AffiliateAccount[]
+  lists        ProductList[]
+  automations  Automation[]
+  channels     Channel[]
+  sessions     Session[]
+  coupons      Coupon[]
+  couponSchedules CouponSchedule[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  @@index([userId, expiresAt])
+}
+
+model OAuthState {
+  id         String   @id @default(cuid())
+  provider   String
+  userId     String
+  stateHash  String   @unique
+  codeVerifier String?
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime @default(now())
+  @@index([provider, expiresAt])
+}
+
+model AffiliateAccount {
+  id           String      @id @default(cuid())
+  userId       String
+  marketplace  Marketplace
+  displayName  String
+  affiliateTag String?
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  externalUserId String?
+  configJson   Json?
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products     Product[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  @@unique([userId, marketplace])
+}
+
+model Product {
+  id              String   @id @default(cuid())
+  accountId       String
+  marketplace     Marketplace
+  externalId      String?
+  title           String
+  description     String?
+  imageUrl        String?
+  productUrl      String
+  affiliateUrl    String
+  price           Decimal? @db.Decimal(12,2)
+  oldPrice        Decimal? @db.Decimal(12,2)
+  discountPercent Int?
+  couponText      String?
+  videoUrl        String?
+  // Comissão de afiliado informada pela plataforma: percentual e valor estimado por venda (R$).
+  commissionRate  Decimal? @db.Decimal(6,2)
+  commissionValue Decimal? @db.Decimal(12,2)
+  active          Boolean  @default(true)
+  account         AffiliateAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  lists           ListProduct[]
+  jobs            PromotionJob[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  @@index([accountId, marketplace])
+}
+
+model ProductList {
+  id          String       @id @default(cuid())
+  userId      String
+  name        String
+  description String?
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products    ListProduct[]
+  automations Automation[]
+  createdAt   DateTime     @default(now())
+}
+
+model ListProduct {
+  listId    String
+  productId String
+  list      ProductList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  product   Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  @@id([listId, productId])
+}
+
+model Channel {
+  id          String      @id @default(cuid())
+  userId      String
+  type        ChannelType
+  name        String
+  destination String
+  enabled     Boolean     @default(true)
+  configJson  Json?
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobs        PromotionJob[]
+  createdAt   DateTime    @default(now())
+}
+
+model Automation {
+  id             String            @id @default(cuid())
+  userId         String
+  name           String
+  description    String?
+  status         AutomationStatus  @default(DRAFT)
+  template       String
+  scheduleJson   Json?
+  rulesJson      Json?
+  listId         String?
+  timezone       String            @default("America/Sao_Paulo")
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  list           ProductList?      @relation(fields: [listId], references: [id], onDelete: SetNull)
+  jobs           PromotionJob[]
+  logs           AutomationLog[]
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  @@index([userId, status])
+}
+
+// Cupom da Shopee ou do Mercado Livre cadastrado pelo usuário (o portal do afiliado não expõe cupom por API).
+// Vencido (validUntil no passado) deixa de sair sozinho. Com inProducts, também entra na linha "Cupom"
+// das mensagens de produto do mesmo marketplace quando o preço atinge minPrice.
+model Coupon {
+  id          String      @id @default(cuid())
+  userId      String
+  marketplace Marketplace
+  code        String
+  description String?
+  minPrice    Decimal?    @db.Decimal(12,2)
+  validUntil  DateTime?
+  inProducts  Boolean     @default(false)
+  enabled     Boolean     @default(true)
+  // MANUAL = digitado/colado pelo usuário; TELEGRAM = importado de um canal público (sourceRef = post, ex. "melicupons/874")
+  source      String      @default("MANUAL")
+  sourceRef   String?
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  @@index([userId, marketplace])
+}
+
+// Envio do "listão" de cupons de um marketplace: uma mensagem com todos os cupons válidos,
+// a cada everyMinutes (0 = não envia sozinho) dentro da janela do dia, para os grupos escolhidos.
+model CouponSchedule {
+  id           String      @id @default(cuid())
+  userId       String
+  marketplace  Marketplace
+  enabled      Boolean     @default(true)
+  everyMinutes Int         @default(120)
+  startTime    String      @default("08:00")
+  endTime      String      @default("22:00")
+  channelIds   Json?
+  link         String?
+  // Canal público do Telegram (ex. "melicupons") de onde importar os cupons antes de cada envio.
+  telegramChannel String?
+  lastSentAt   DateTime?
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  @@unique([userId, marketplace])
+}
+
+model PromotionJob {
+  id           String       @id @default(cuid())
+  automationId String
+  productId    String?
+  channelId    String
+  scheduledAt  DateTime
+  status       JobStatus    @default(PENDING)
+  attempts     Int          @default(0)
+  payloadJson  Json?
+  errorMessage String?
+  sentAt       DateTime?
+  automation   Automation   @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  product      Product?     @relation(fields: [productId], references: [id], onDelete: SetNull)
+  channel      Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  createdAt    DateTime     @default(now())
+  @@index([status, scheduledAt])
+}
+
+model AutomationLog {
+  id           String      @id @default(cuid())
+  automationId String?
+  channel      String?
+  action       String
+  status       String
+  message      String?
+  metadataJson Json?
+  automation   Automation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
+  createdAt    DateTime    @default(now())
+  @@index([automationId, createdAt])
+}
+
+model AppSetting {
+  key       String   @id
+  valueEnc  String
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+}
