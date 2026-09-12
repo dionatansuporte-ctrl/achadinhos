@@ -143,11 +143,14 @@ export async function runAutomation(automationId: string, opts: { source: 'manua
   const titleNote = () => skippedTitle ? ` (${skippedTitle} por título igual em outro anúncio)` : '';
   if (hasShopeeSearch(rules)) {
     const seen = new Set<string>();
+    // O desconto mínimo das regras vai junto, para o Mercado Livre filtrar já na API.
+    const minDiscount = (rules as any).minDiscount;
+    // Rodízio de termos: o nº de rodadas anteriores desta automação diz qual bloco de termos usar agora,
+    // para que todos os termos da lista apareçam ao longo do dia, não só os primeiros.
+    const keywordCursor = await prisma.automationLog.count({ where: { automationId: a.id, action: { in: ['RUN', 'GENERATE_JOBS'] } } });
+    const rule = { ...rules.shopeeSearch, minDiscount: typeof minDiscount === 'number' ? minDiscount : undefined, keywordCursor };
     for (let page = 1; page <= MAX_SHOPEE_PAGES && fresh_.length < wanted; page++) {
       let found: any[];
-      // O desconto mínimo das regras vai junto, para o Mercado Livre filtrar já na API.
-      const minDiscount = (rules as any).minDiscount;
-      const rule = { ...rules.shopeeSearch, minDiscount: typeof minDiscount === 'number' ? minDiscount : undefined };
       try { found = await syncShopeeProducts(a.userId, rule, a.listId, page); }
       catch (e: any) {
         await prisma.automationLog.create({ data: { automationId: a.id, action: 'SEARCH', status: 'ERROR', message: `${searchMarketplaceLabel(rule)}: ${e.message}` } });
@@ -159,7 +162,7 @@ export async function runAutomation(automationId: string, opts: { source: 'manua
       if (!fresh.length) break; // a API repetiu a página: não há mais novidade
       fresh.forEach(consider);
     }
-    await prisma.automationLog.create({ data: { automationId: a.id, action: 'SEARCH', status: 'OK', message: `${searchMarketplaceLabel(rules.shopeeSearch)}: ${fresh_.length} produto(s) novos${repeats.length ? ` + ${repeats.length} liberado(s) para repetir` : ''} para "${describeSearch(rules.shopeeSearch)}"${skipped ? `, ${skipped} já enviados ignorados${titleNote()}` : ''}.` } });
+    await prisma.automationLog.create({ data: { automationId: a.id, action: 'SEARCH', status: 'OK', message: `${searchMarketplaceLabel(rule)}: ${fresh_.length} produto(s) novos${repeats.length ? ` + ${repeats.length} liberado(s) para repetir` : ''} para "${describeSearch(rule)}"${skipped ? `, ${skipped} já enviados ignorados${titleNote()}` : ''}.` } });
   } else {
     const products = a.list?.products.map(x => x.product).filter(p => p.active)
       || await prisma.product.findMany({ where: { account: { userId: a.userId }, active: true }, orderBy: { createdAt: 'desc' } });

@@ -19,7 +19,28 @@ export type ShopeeSearchRule = {
   sorts?: string[];              // vários critérios marcados; quem aparece bem em mais de um sobe
   limit?: number;
   minDiscount?: number;           // repassado ao ML para filtrar já na API
+  keywordCursor?: number;         // nº da rodada (o robô informa): escolhe o bloco de termos do rodízio
 };
+
+/** Quantos termos entram por rodada: ~3 produtos por termo, no mínimo 3 termos. */
+export function keywordWindowSize(count: number, limit: number): number {
+  return Math.min(count, Math.max(3, Math.ceil((limit || 10) / 3)));
+}
+
+/**
+ * Termos desta rodada. Com muitos termos, buscar em todos a cada rodada faria sempre os primeiros
+ * da lista vencerem. Então cada rodada usa um bloco de termos e a próxima avança na lista (rodízio),
+ * até todos passarem. Sem `keywordCursor` (ex.: "Testar busca agora"), usa o bloco do início.
+ */
+export function keywordWindow(rule: ShopeeSearchRule): { terms: string[]; size: number; total: number } {
+  const all = ruleKeywords(rule);
+  const size = keywordWindowSize(all.length, rule.limit || 10);
+  if (all.length <= size) return { terms: all, size, total: all.length };
+  const round = Math.max(0, Math.floor(Number(rule.keywordCursor) || 0));
+  const start = (round * size) % all.length;
+  const rotated = [...all.slice(start), ...all.slice(0, start)];
+  return { terms: rotated.slice(0, size), size, total: all.length };
+}
 
 /** Lista final de termos: `keywords` novo ou `keyword` legado, sem vazios nem repetidos. */
 export function ruleKeywords(rule: ShopeeSearchRule): string[] {
@@ -77,6 +98,11 @@ function interleave<T extends { itemId?: string; id?: string }>(lists: T[][], li
 export function describeSearch(rule: ShopeeSearchRule): string {
   const ks = ruleKeywords(rule);
   if (!ks.length) return `categoria ${rule.categoryId}`;
+  // Com rodízio ativo, mostra os termos usados nesta rodada.
+  if (rule.keywordCursor !== undefined) {
+    const w = keywordWindow(rule);
+    if (w.total > w.size) return `${w.terms.join(', ')} (rodízio: ${w.size} de ${w.total} termos)`;
+  }
   if (ks.length <= 3) return ks.join(', ');
   return `${ks.slice(0, 3).join(', ')} +${ks.length - 3}`;
 }
@@ -138,11 +164,11 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 }
 
 async function searchOffersSingle(userId: string, rule: ShopeeSearchRule, limit: number, page: number): Promise<ShopeeOffer[]> {
-  const keywords = ruleKeywords(rule);
+  const keywords = keywordWindow(rule).terms; // bloco de termos desta rodada (rodízio)
   if (keywords.length <= 1) return searchOne(userId, rule, keywords[0], limit, page);
 
   const perTerm = Math.max(3, Math.ceil(limit / keywords.length));
-  // Até 50 termos por automação; consulta em lotes de 8 para não estourar o limite de requisições da Shopee.
+  // Consulta em lotes de 8 para não estourar o limite de requisições da Shopee.
   const results = await mapLimit(keywords, 8, k => searchOne(userId, rule, k, perTerm, page).catch(() => [] as ShopeeOffer[]));
   if (results.every(r => !r.length)) {
     // Todos falharam: refaz um para devolver o erro real ao usuário.
