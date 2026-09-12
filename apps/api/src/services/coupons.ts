@@ -3,6 +3,7 @@ import { prisma } from '../db';
 import { promotionQueue } from '../queue';
 import { inWindow, minutesOfDay } from './scheduler';
 import { importTelegramCoupons } from './coupon-import';
+import { hasShopeeSearch, ruleMarketplaces } from './shopee-sync';
 
 /**
  * Cupons da Shopee e do Mercado Livre.
@@ -101,8 +102,8 @@ export async function marketplaceChannelIds(userId: string, marketplace: Marketp
   let all = false;
   for (const a of autos) {
     const rules = (a.rulesJson || {}) as any;
-    const mkt = rules?.shopeeSearch?.marketplace || rules?.marketplace;
-    if (mkt !== marketplace) continue;
+    const mkts: string[] = hasShopeeSearch(rules) ? ruleMarketplaces(rules.shopeeSearch) : [rules?.marketplace];
+    if (!mkts.includes(marketplace)) continue;
     const picked = (a.scheduleJson as any)?.channelIds;
     if (Array.isArray(picked) && picked.length) { for (const id of picked) if (typeof id === 'string') ids.add(id); }
     else all = true;

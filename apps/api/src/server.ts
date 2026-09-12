@@ -13,6 +13,7 @@ import { getSecret, describeSecret, saveSecrets, SETTING_KEYS } from './services
 import { searchOffers, hasShopeeSearch, describeSearch } from './services/shopee-sync';
 import { decryptSecret } from './services/crypto';
 import { runAutomation } from './services/automation-runner';
+import { titleKey } from './services/title-key';
 import { salesReport, clearSalesCache } from './services/reports';
 import { createBackup, listBackups, backupPath, deleteBackup, BACKUP_DIR } from './services/backup';
 import { startScheduler, describeSchedule } from './services/scheduler';
@@ -236,8 +237,14 @@ app.delete('/api/automations/:id', requireAuth, asyncRoute(async(req:any,res:any
 
 app.get('/api/products', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const rows=await prisma.product.findMany({where:{account:{userId:req.user.id}},include:{lists:{include:{list:{select:{id:true,name:true}}}}},orderBy:{createdAt:'desc'}});
+  // Quantas vezes cada produto já saiu e quando foi o último envio.
+  const sent=rows.length?await prisma.promotionJob.groupBy({by:['productId'],where:{productId:{in:rows.map(r=>r.id)},status:'SENT'},_count:{_all:true},_max:{sentAt:true}}):[];
+  const sentMap=new Map(sent.map(s=>[s.productId,s]));
+  // Mesmo título em anúncios diferentes (IDs diferentes): o robô trata como o mesmo produto.
+  const keys=rows.map(r=>titleKey(r.title));const keyCount=new Map<string,number>();
+  for(const k of keys) if(k) keyCount.set(k,(keyCount.get(k)||0)+1);
   // "linhas" = listas a que o produto pertence (cada automação com busca Shopee tem a sua).
-  res.json(rows.map(({lists,...p})=>({...p,lines:lists.map(l=>l.list)})));
+  res.json(rows.map(({lists,...p},i)=>{const s=sentMap.get(p.id);const k=keys[i];return {...p,lines:lists.map(l=>l.list),sentCount:s?._count._all||0,lastSentAt:s?._max.sentAt||null,titleKey:k,sameTitleCount:k?(keyCount.get(k)||1)-1:0}}));
 }));
 app.post('/api/products/bulk-delete', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const body=z.object({ids:z.array(z.string()).min(1).max(500)}).parse(req.body);
@@ -347,7 +354,7 @@ app.get('/api/mercadolivre/trends', requireAuth, asyncRoute(async(req:any,res:an
   try{ res.json({keywords:await trendingKeywords(req.user.id,categoryId)}); }catch(e:any){ res.status(400).json({error:e.message}); }
 }));
 app.post('/api/shopee/search', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({marketplace:z.enum(['SHOPEE','MERCADO_LIVRE']).optional(),keyword:z.string().optional(),keywords:z.array(z.string()).max(30).optional(),categoryId:z.union([z.string(),z.number()]).optional(),sort:z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING']).optional(),sorts:z.array(z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING'])).max(5).optional(),limit:z.coerce.number().int().min(1).max(50).optional(),minDiscount:z.coerce.number().int().min(0).max(99).optional()}).parse(req.body);
+  const body=z.object({marketplace:z.enum(['SHOPEE','MERCADO_LIVRE']).optional(),marketplaces:z.array(z.enum(['SHOPEE','MERCADO_LIVRE'])).max(2).optional(),keyword:z.string().optional(),keywords:z.array(z.string()).max(50).optional(),categoryId:z.union([z.string(),z.number()]).optional(),sort:z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING']).optional(),sorts:z.array(z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING'])).max(5).optional(),limit:z.coerce.number().int().min(1).max(50).optional(),minDiscount:z.coerce.number().int().min(0).max(99).optional()}).parse(req.body);
   try{ res.json({offers:await searchOffers(req.user.id,{...body,categoryId:body.categoryId===''?undefined:body.categoryId})}); }
   catch(e:any){ res.status(400).json({error:e.message}); }
 }));
