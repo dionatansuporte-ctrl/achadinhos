@@ -426,3 +426,16 @@ button.danger:disabled{opacity:.45;cursor:not-allowed}
 .line-head-row{display:flex;align-items:center;gap:8px;padding-right:14px}
 .line-head-row .line-head{flex:1;min-width:0}
 .line-del{flex:none}
+
+/* Tela Envios */
+.send-row{display:grid;grid-template-columns:44px minmax(0,1fr) auto auto auto;gap:14px;align-items:center;padding:12px 6px;border-bottom:1px solid var(--border);font-size:14.5px}
+.send-row:last-child{border-bottom:0}
+.send-row img,.send-noimg{width:44px;height:44px;border-radius:8px;object-fit:cover;background:var(--border)}
+.send-main{display:flex;flex-direction:column;gap:2px;min-width:0}
+.send-main strong{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.send-main small{color:var(--dim)}
+.send-row>small{color:var(--dim);white-space:nowrap}
+@media (max-width:760px){
+  .send-row{grid-template-columns:44px minmax(0,1fr) auto}
+  .send-row>small,.send-row>a,.send-row>span:last-child{grid-column:2/-1}
+}

@@ -367,6 +367,23 @@ app.post('/api/promotions/queue', requireAuth, asyncRoute(async(req:any,res:any)
 }));
 
 app.get('/api/logs', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await prisma.automationLog.findMany({where:{automation:{userId:req.user.id}},orderBy:{createdAt:'desc'},take:200}))));
+
+// Envios (um por produto × grupo) para a tela Envios: o que saiu, para onde, quando e com que resultado.
+app.get('/api/sends', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const q=z.object({days:z.coerce.number().int().min(1).max(90).default(7),channelId:z.string().optional(),automationId:z.string().optional(),status:z.enum(['PENDING','PROCESSING','SENT','FAILED']).optional(),search:z.string().optional()}).parse(req.query);
+  const since=new Date(Date.now()-q.days*86400000);
+  const rows=await prisma.promotionJob.findMany({
+    where:{automation:{userId:req.user.id},createdAt:{gte:since},...(q.channelId?{channelId:q.channelId}:{}),...(q.automationId?{automationId:q.automationId}:{}),...(q.status?{status:q.status}:{})},
+    orderBy:{createdAt:'desc'},take:1000,
+    select:{id:true,status:true,attempts:true,errorMessage:true,createdAt:true,sentAt:true,payloadJson:true,product:{select:{title:true,marketplace:true,affiliateUrl:true,imageUrl:true,price:true}},channel:{select:{id:true,name:true}},automation:{select:{id:true,name:true}}}
+  });
+  const search=(q.search||'').trim().toLowerCase();
+  const sends=rows.map(r=>{const p:any=r.payloadJson||{};const title=r.product?.title||p.title||'(sem título)';return {id:r.id,status:r.status,attempts:r.attempts,error:r.errorMessage,createdAt:r.createdAt,sentAt:r.sentAt,title,marketplace:r.product?.marketplace||null,price:r.product?.price!=null?Number(r.product.price):null,imageUrl:r.product?.imageUrl||p.imageUrl||null,affiliateUrl:r.product?.affiliateUrl||p.affiliateUrl||null,productDeleted:!r.product&&!/^Cupons /.test(String(p.title||'')),channel:r.channel,automation:r.automation}})
+    .filter(s=>!search||s.title.toLowerCase().includes(search));
+  const channels=await prisma.channel.findMany({where:{userId:req.user.id},select:{id:true,name:true},orderBy:{name:'asc'}});
+  const automations=await prisma.automation.findMany({where:{userId:req.user.id},select:{id:true,name:true},orderBy:{name:'asc'}});
+  res.json({sends,channels,automations});
+}));
 app.post('/api/offers/preview', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const body=z.object({productId:z.string(),template:z.string().optional()}).parse(req.body); const p=await prisma.product.findFirst({where:{id:body.productId,account:{userId:req.user.id}}}); if(!p)return res.status(404).json({error:'Produto não encontrado.'});
   const coupons=await productCoupons(req.user.id);
@@ -515,8 +532,15 @@ app.post('/api/offers/send-now', requireAuth, asyncRoute(async(req:any,res:any)=
 // Usado pelo worker: a sessão do WhatsApp Web vive só neste processo.
 app.post('/internal/whatsapp/send', asyncRoute(async(req:any,res:any)=>{
   if(!process.env.JWT_SECRET || req.headers['x-internal-secret']!==process.env.JWT_SECRET) return res.status(401).json({error:'Não autorizado.'});
-  const body=z.object({jid:z.string(),text:z.string(),imageUrl:z.string().url().optional()}).parse(req.body);
-  try{ await sendWhatsAppWebText(body.jid,body.text,body.imageUrl); res.json({ok:true}); }catch(e:any){ res.status(409).json({error:e.message}); }
+  const body=z.object({jid:z.string(),text:z.string(),imageUrl:z.string().url().optional(),jobId:z.string().optional()}).parse(req.body);
+  try{
+    // Nova tentativa de um job já entregue (a resposta anterior ao worker se perdeu)? Não manda de novo.
+    if(body.jobId){ const j=await prisma.promotionJob.findUnique({where:{id:body.jobId},select:{status:true}}); if(j?.status==='SENT') return res.json({ok:true,already:true}); }
+    await sendWhatsAppWebText(body.jid,body.text,body.imageUrl);
+    // Marca entregue aqui, no mesmo processo que entregou: se a resposta se perder, a retentativa vê SENT.
+    if(body.jobId) await prisma.promotionJob.update({where:{id:body.jobId},data:{status:'SENT',sentAt:new Date(),errorMessage:null}}).catch(()=>{});
+    res.json({ok:true});
+  }catch(e:any){ res.status(409).json({error:e.message}); }
 }));
 
 app.get('/api/integrations/settings', requireAuth, asyncRoute(async(_req:any,res:any)=>{

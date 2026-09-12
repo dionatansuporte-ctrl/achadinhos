@@ -50,8 +50,15 @@ export async function runAutomation(automationId: string, opts: { source: 'manua
   // com a data do último envio. Mesmo item reimportado com outro id (externalId/URL iguais) conta,
   // e o mesmo produto em outro anúncio (ID diferente, título igual ou quase igual) também.
   // Envios cujo produto foi excluído ainda contam pelo título guardado na mensagem.
+  // Só o histórico que pode bloquear: na fila, ou criado dentro da janela de repetição. Com "nunca repetir"
+  // (0 dias) precisa de tudo. Mínimo de 30 dias para "novos primeiro" ainda distinguir produto nunca
+  // enviado de produto antigo. Evita carregar meses de envios a cada rodada.
+  const historyMs = repeatAfterDays === 0 ? undefined : Math.max(repeatAfterMs, 30 * 86_400_000);
   const sentRows = await prisma.promotionJob.findMany({
-    where: { channelId: { in: channels.map(c => c.id) }, status: { in: ['PENDING', 'PROCESSING', 'SENT'] } },
+    where: {
+      channelId: { in: channels.map(c => c.id) }, status: { in: ['PENDING', 'PROCESSING', 'SENT'] },
+      ...(historyMs ? { OR: [{ status: { in: ['PENDING', 'PROCESSING'] } }, { createdAt: { gte: new Date(now - historyMs) } }] } : {})
+    },
     select: { productId: true, channelId: true, status: true, sentAt: true, createdAt: true, payloadJson: true, product: { select: { externalId: true, productUrl: true, title: true } } }
   });
   // chave produto+grupo → instante do último envio (Infinity = ainda na fila, nunca pode repetir agora)
