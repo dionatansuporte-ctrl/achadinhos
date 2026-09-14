@@ -28,6 +28,7 @@ import { couponListMessage, parseValidUntil, isExpired, sendCouponList, productC
 import { parseCouponText, importTelegramCoupons } from './services/coupon-import';
 import { extractMercadoLivreItemId, fetchMercadoLivreItem } from './services/mercadolivre';
 import { trendingKeywords } from './integrations/mercadolivre-search';
+import { searchCategories, warmUpCategories } from './services/ml-categories';
 
 const app = express();
 const webUrl=process.env.WEB_URL||'http://127.0.0.1:8080';
@@ -353,6 +354,11 @@ app.get('/api/mercadolivre/trends', requireAuth, asyncRoute(async(req:any,res:an
   const categoryId=typeof req.query.categoryId==='string'&&/^MLB\d+$/i.test(req.query.categoryId)?req.query.categoryId.toUpperCase():undefined;
   try{ res.json({keywords:await trendingKeywords(req.user.id,categoryId)}); }catch(e:any){ res.status(400).json({error:e.message}); }
 }));
+// Campo "Digite um nicho" da busca automática: "infantil" -> todas as categorias do ML ligadas a isso, com subcategorias.
+app.get('/api/categories/search', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const q=z.object({q:z.string().trim().min(2).max(80)}).parse(req.query);
+  try{ res.json(await searchCategories(q.q)); }catch(e:any){ res.status(400).json({error:e.message}); }
+}));
 app.post('/api/shopee/search', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const body=z.object({marketplace:z.enum(['SHOPEE','MERCADO_LIVRE']).optional(),marketplaces:z.array(z.enum(['SHOPEE','MERCADO_LIVRE'])).max(2).optional(),keyword:z.string().optional(),keywords:z.array(z.string()).max(50).optional(),categoryId:z.union([z.string(),z.number()]).optional(),sort:z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING']).optional(),sorts:z.array(z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING'])).max(5).optional(),limit:z.coerce.number().int().min(1).max(50).optional(),minDiscount:z.coerce.number().int().min(0).max(99).optional()}).parse(req.body);
   try{ res.json({offers:await searchOffers(req.user.id,{...body,categoryId:body.categoryId===''?undefined:body.categoryId})}); }
@@ -601,7 +607,7 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
-app.listen(Number(process.env.PORT||3333),()=>{ console.log('OfertasDaHora API em http://localhost:3333'); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
+app.listen(Number(process.env.PORT||3333),()=>{ console.log('OfertasDaHora API em http://localhost:3333'); warmUpCategories(); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).

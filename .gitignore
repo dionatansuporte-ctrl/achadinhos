@@ -11,3 +11,4 @@ tools/cloudflared.exe
 tools/cloudflared.log
 apps/api/ml-redirect.txt
 tsconfig.tsbuildinfo
+apps/api/.cache/
