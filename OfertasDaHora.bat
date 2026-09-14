@@ -22,7 +22,7 @@ echo   ==========================================
 echo      OfertasDaHora
 echo   ==========================================
 echo.
-echo     1  Iniciar tudo (Docker, banco, API, worker, painel)
+echo     1  Iniciar tudo (PostgreSQL, API, worker, painel)
 echo     2  Parar API, worker e painel
 echo     3  Fazer backup agora
 echo     4  Restaurar um backup

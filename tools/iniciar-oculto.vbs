@@ -12,8 +12,8 @@ logs = root & "\logs"
 If Not fso.FolderExists(logs) Then fso.CreateFolder logs
 semWeb = (WScript.Arguments.Count > 0 And LCase(WScript.Arguments(0)) = "semweb")
 
-' 0 = janela oculta. True = espera terminar (so no docker, que e rapido).
-sh.Run "cmd /c docker compose up -d >> """ & logs & "\docker.log"" 2>&1", 0, True
+' 0 = janela oculta. True = espera terminar (o banco sobe rapido).
+sh.Run "cmd /c call """ & root & "\tools\postgres.bat"" start >> """ & logs & "\postgres-start.log"" 2>&1", 0, True
 
 ' Se ja estiver rodando, nao sobe de novo (evita duas APIs na mesma porta).
 If Not JaRodando() Then

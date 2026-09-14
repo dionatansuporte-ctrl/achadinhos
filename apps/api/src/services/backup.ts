@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
  *   wa-auth/        → sessão do WhatsApp (evita escanear o QR de novo)
  *   source/         → o código, sem node_modules/dist/logs
  *   manifest.json
- * Usa o Docker (pg_dump dentro do container), robocopy e Compress-Archive: pensado para Windows.
+ * Usa o pg_dump do PostgreSQL portátil (pasta pgsql), robocopy e Compress-Archive: pensado para Windows.
  */
 
 export const ROOT = path.resolve(__dirname, '..', '..', '..', '..'); // <root>/apps/api/src/services → <root>
@@ -27,15 +27,33 @@ function run(cmd: string, args: string[], opts: { cwd?: string; input?: string }
 
 function dbParts() {
   const url = new URL(process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/achadinhopro');
-  return { user: decodeURIComponent(url.username || 'postgres'), db: url.pathname.replace(/^\//, '') || 'achadinhopro' };
+  return {
+    user: decodeURIComponent(url.username || 'postgres'),
+    password: decodeURIComponent(url.password || 'postgres'),
+    host: url.hostname || 'localhost',
+    port: url.port || '5432',
+    db: url.pathname.replace(/^\//, '') || 'achadinhopro',
+  };
 }
 
-/** Dump do banco pelo container do Postgres (não exige pg_dump instalado no Windows). */
+/** Acha o pg_dump do PostgreSQL portátil: PGSQL_DIR, <root>\..\pgsql (ex.: C:\Criar sites\pgsql) ou <root>\pgsql. */
+function findPgDump(): string | null {
+  const exe = process.platform === 'win32' ? 'pg_dump.exe' : 'pg_dump';
+  const candidates = [process.env.PGSQL_DIR, path.join(ROOT, '..', 'pgsql'), path.join(ROOT, 'pgsql')]
+    .filter((d): d is string => !!d)
+    .map(d => path.join(d, 'bin', exe));
+  return candidates.find(p => fs.existsSync(p)) || null;
+}
+
+/** Dump do banco com o pg_dump do PostgreSQL portátil. */
 function dumpDatabase(to: string) {
-  const { user, db } = dbParts();
-  const r = run('docker', ['compose', 'exec', '-T', 'postgres', 'pg_dump', '-U', user, '--clean', '--if-exists', '--no-owner', db]);
+  const { user, password, host, port, db } = dbParts();
+  const pgDump = findPgDump();
+  if (!pgDump) throw new Error('Não achei pgsql\\bin\\pg_dump.exe. Extraia o PostgreSQL em "C:\\Criar sites\\pgsql" ou defina PGSQL_DIR.');
+  const r = spawnSync(pgDump, ['-h', host, '-p', port, '-U', user, '--clean', '--if-exists', '--no-owner', db],
+    { cwd: ROOT, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, windowsHide: true, env: { ...process.env, PGPASSWORD: password } });
   if (r.status !== 0 || !r.stdout || r.stdout.length < 100) {
-    throw new Error(`Falha no pg_dump: ${(r.stderr || '').trim().slice(0, 300) || 'o Docker está rodando?'}`);
+    throw new Error(`Falha no pg_dump: ${(r.stderr || '').trim().slice(0, 300) || 'o PostgreSQL está ligado? (tools\\postgres.bat start)'}`);
   }
   fs.writeFileSync(to, r.stdout, 'utf8');
   return r.stdout.length;

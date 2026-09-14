@@ -12,5 +12,5 @@ if exist "%LNK%" (
   echo Use a mesma opcao de novo para remover.
 )
 echo.
-echo Lembre: o Docker Desktop tambem precisa iniciar com o Windows (opcao nas configuracoes dele).
+echo O PostgreSQL (pasta pgsql) sobe junto. Nao precisa de Docker.
 timeout /t 8 >nul

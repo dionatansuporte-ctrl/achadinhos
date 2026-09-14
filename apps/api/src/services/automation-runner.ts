@@ -1,5 +1,4 @@
 import { prisma } from '../db';
-import { promotionQueue } from '../queue';
 import { renderOffer, defaultOfferTemplate } from './offer';
 import { matchesRules } from './rules';
 import { productCoupons, pickCoupon } from './coupons';
@@ -194,7 +193,6 @@ export async function runAutomation(automationId: string, opts: { source: 'manua
     });
     for (const c of pendingChannels(p)) {
       const job = await prisma.promotionJob.create({ data: { automationId: a.id, productId: p.id, channelId: c.id, scheduledAt: new Date(), payloadJson: { title: p.title, text, affiliateUrl: p.affiliateUrl, imageUrl: p.imageUrl } } });
-      await promotionQueue.add('send-promotion', { jobId: job.id }, { attempts: 3, removeOnComplete: 100, removeOnFail: 100 });
       rememberSent(p, c.id, Infinity); // evita mandar o "mesmo" produto de novo nesta rodada
       jobs++;
     }

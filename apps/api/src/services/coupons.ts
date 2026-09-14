@@ -1,6 +1,5 @@
 import type { Coupon, CouponSchedule, Marketplace } from '@prisma/client';
 import { prisma } from '../db';
-import { promotionQueue } from '../queue';
 import { inWindow, minutesOfDay } from './scheduler';
 import { importTelegramCoupons } from './coupon-import';
 import { hasShopeeSearch, ruleMarketplaces } from './shopee-sync';
@@ -141,7 +140,6 @@ export async function sendCouponList(sch: CouponSchedule, source: 'manual' | 'sc
   const text = couponListMessage(sch.marketplace, coupons, sch.link);
   for (const ch of channels) {
     const job = await prisma.promotionJob.create({ data: { automationId: a.id, channelId: ch.id, scheduledAt: new Date(), payloadJson: { title: `Cupons ${marketplaceName(sch.marketplace)}`, text, affiliateUrl: sch.link || '' } } });
-    await promotionQueue.add('send-promotion', { jobId: job.id }, { attempts: 3, removeOnComplete: 100, removeOnFail: 100 });
   }
   await prisma.couponSchedule.update({ where: { id: sch.id }, data: { lastSentAt: new Date() } });
   await prisma.automationLog.create({ data: { automationId: a.id, action: 'RUN', status: 'OK', message: `Listão ${marketplaceName(sch.marketplace)} com ${coupons.length} cupom(ns) para ${channels.length} grupo(s)${source === 'manual' ? ', envio pelo botão' : ''}.` } });

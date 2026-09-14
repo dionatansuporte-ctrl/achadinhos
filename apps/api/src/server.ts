@@ -8,7 +8,6 @@ import https from 'node:https';
 import selfsigned from 'selfsigned';
 import { z } from 'zod';
 import { prisma } from './db';
-import { promotionQueue } from './queue';
 import { getSecret, describeSecret, saveSecrets, SETTING_KEYS } from './services/settings';
 import { searchOffers, hasShopeeSearch, describeSearch } from './services/shopee-sync';
 import { decryptSecret } from './services/crypto';
@@ -369,7 +368,7 @@ app.post('/api/promotions/queue', requireAuth, asyncRoute(async(req:any,res:any)
   const body=z.object({automationId:z.string(),productId:z.string().optional(),channelId:z.string(),scheduledAt:z.coerce.date(),payload:z.object({title:z.string(),text:z.string(),affiliateUrl:z.string().url(),imageUrl:z.string().url().optional()})}).parse(req.body);
   const owned=await prisma.automation.findFirst({where:{id:body.automationId,userId:req.user.id}}); if(!owned)return res.status(404).json({error:'Automação inválida.'});
   const job=await prisma.promotionJob.create({data:{automationId:body.automationId,productId:body.productId,channelId:body.channelId,scheduledAt:body.scheduledAt,payloadJson:body.payload}});
-  await promotionQueue.add('send-promotion',{jobId:job.id},{delay:Math.max(0,body.scheduledAt.getTime()-Date.now()),attempts:3}); res.status(201).json(job);
+  res.status(201).json(job); // a linha PENDING com scheduledAt já é a fila: o worker pega quando vencer
 }));
 
 app.get('/api/logs', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await prisma.automationLog.findMany({where:{automation:{userId:req.user.id}},orderBy:{createdAt:'desc'},take:200}))));
@@ -529,7 +528,7 @@ app.post('/api/offers/send-now', requireAuth, asyncRoute(async(req:any,res:any)=
     const text=renderOffer(template,{title:p.title,price:p.price?Number(p.price):undefined,oldPrice:p.oldPrice?Number(p.oldPrice):undefined,discountPercent:p.discountPercent||undefined,couponText:p.couponText||pickCoupon(coupons,p),affiliateUrl:p.affiliateUrl});
     for(const c of channels){
       const job=await prisma.promotionJob.create({data:{automationId:manual.id,productId:p.id,channelId:c.id,scheduledAt:new Date(),payloadJson:{title:p.title,text,affiliateUrl:p.affiliateUrl,imageUrl:p.imageUrl}}});
-      await promotionQueue.add('send-promotion',{jobId:job.id},{attempts:3,removeOnComplete:100,removeOnFail:100}); count++;
+      count++;
     }
   }
   res.status(201).json({count});

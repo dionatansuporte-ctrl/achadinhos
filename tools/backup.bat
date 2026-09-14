@@ -2,7 +2,7 @@
 chcp 65001 >nul
 title OfertasDaHora - backup
 echo Gerando backup completo (banco, credenciais, sessao do WhatsApp e codigo)...
-echo O Docker precisa estar ligado.
+echo O PostgreSQL precisa estar ligado (OfertasDaHora.bat, opcao Iniciar).
 echo.
 cd /d "%~dp0..\apps\api"
 npx tsx src/scripts/backup.ts

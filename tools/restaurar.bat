@@ -3,6 +3,8 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 title OfertasDaHora - restaurar backup
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
+if not defined PGSQL_DIR for %%I in ("%ROOT%\..\pgsql") do set "PGSQL_DIR=%%~fI"
+if not exist "%PGSQL_DIR%\bin\psql.exe" set "PGSQL_DIR=%ROOT%\pgsql"
 
 echo ================================================================
 echo   OfertasDaHora - RESTAURAR BACKUP
@@ -54,15 +56,12 @@ if not exist "%ROOT%\apps\api\node_modules" (cd /d "%ROOT%\apps\api" && call npm
 if not exist "%ROOT%\apps\web\node_modules" (cd /d "%ROOT%\apps\web" && call npm install --no-audit --no-fund)
 
 rem --- banco
-echo [5/6] Subindo o Docker e restaurando o banco...
+echo [5/6] Ligando o PostgreSQL e restaurando o banco...
 cd /d "%ROOT%"
-docker compose up -d
-if errorlevel 1 (echo Docker nao respondeu. Abra o Docker Desktop e rode de novo. & pause & exit /b 1)
-echo   aguardando o Postgres...
-:waitpg
-docker compose exec -T postgres pg_isready -U postgres >nul 2>&1
-if errorlevel 1 (timeout /t 2 >nul & goto waitpg)
-docker compose exec -T postgres psql -U postgres -d achadinhopro -v ON_ERROR_STOP=0 -q < "%TMPD%\db.sql" >nul
+call "%ROOT%\tools\postgres.bat" start
+if errorlevel 1 (echo O PostgreSQL nao subiu. Veja logs\postgres.log e rode de novo. & pause & exit /b 1)
+set "PGPASSWORD=postgres"
+"%PGSQL_DIR%\bin\psql.exe" -h localhost -U postgres -d achadinhopro -v ON_ERROR_STOP=0 -q -f "%TMPD%\db.sql" >nul
 if errorlevel 1 (echo   Aviso: o psql reportou erros; confira se o sistema abre normalmente.)
 cd /d "%ROOT%\apps\api"
 call npx prisma generate >nul

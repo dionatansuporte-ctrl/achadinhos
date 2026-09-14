@@ -6,7 +6,7 @@ Projeto full-stack para automatizar achadinhos/ofertas de afiliados, inspirado n
 
 - Login e cadastro com senha criptografada (bcrypt) e sessão JWT.
 - PostgreSQL + Prisma.
-- Redis + BullMQ para fila de envios.
+- Fila de envios na tabela `PromotionJob` do Postgres (worker com `FOR UPDATE SKIP LOCKED`, 3 tentativas), sem Redis.
 - Mercado Livre OAuth 2.0 com `state`, PKCE, refresh token e criptografia AES-256-GCM em repouso.
 - Importação de produto do Mercado Livre por URL/ID MLB usando API oficial.
 - Cadastro manual de produtos Shopee com link de afiliado.
@@ -39,22 +39,22 @@ achadinhopro-final/
 │   │       └── worker.ts
 │   └── web/
 │       └── src/App.tsx
-├── docker-compose.yml
 └── README.md
 ```
 
 ## 1. Requisitos
 
 - Node.js 20+
-- Docker Desktop
-- Conta PostgreSQL/Redis local via Docker
+- PostgreSQL 16+ portátil (zip) extraído em `C:\Criar sites\pgsql` (pasta ao lado do projeto). Não precisa de Docker nem de Redis: a fila de envios fica na tabela `PromotionJob` do próprio Postgres.
 - Credenciais próprias das APIs que serão usadas
 
-## 2. Subir banco e Redis
+## 2. Subir o banco
 
-```bash
-docker compose up -d
+```bat
+tools\postgres.bat start
 ```
+
+O `postgres.bat` cria o cluster na primeira vez (usuário `postgres`, senha `postgres`, banco `achadinhopro`, porta 5432) e depois só liga o servidor. Os dados ficam em `pgsql\data`; o log em `logs\postgres.log`. Outros comandos: `stop`, `status`, `psql`.
 
 ## 3. API
 
