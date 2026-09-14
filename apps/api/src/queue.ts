@@ -11,11 +11,14 @@ export const MAX_ATTEMPTS = 3;
 /** Pega até `limit` jobs prontos (PENDING com scheduledAt vencido) e marca PROCESSING, sem dois workers pegarem o mesmo. */
 export async function claimPromotionJobs(limit: number): Promise<string[]> {
   if (limit <= 0) return [];
+  // O Prisma grava scheduledAt em UTC numa coluna "timestamp" sem fuso. Comparar com now() puro usa o fuso
+  // da sessão do Postgres (o portátil no Windows fica em America/Sao_Paulo) e atrasava cada envio em 3 horas.
+  // "now() AT TIME ZONE 'utc'" devolve o horário atual em UTC sem fuso, igual ao que está gravado.
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     UPDATE "PromotionJob" SET status = 'PROCESSING'
     WHERE id IN (
       SELECT id FROM "PromotionJob"
-      WHERE status = 'PENDING' AND "scheduledAt" <= now()
+      WHERE status = 'PENDING' AND "scheduledAt" <= (now() AT TIME ZONE 'utc')
       ORDER BY "scheduledAt"
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
