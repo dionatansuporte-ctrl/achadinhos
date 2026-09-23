@@ -28,6 +28,8 @@ import { parseCouponText, importTelegramCoupons } from './services/coupon-import
 import { extractMercadoLivreItemId, fetchMercadoLivreItem } from './services/mercadolivre';
 import { trendingKeywords } from './integrations/mercadolivre-search';
 import { searchCategories, warmUpCategories } from './services/ml-categories';
+import { getBot, customerLink, sendOffersTo, sendTextTo, startCustomerBot, parseIntent } from './services/customer-bot';
+import QRCode from 'qrcode';
 
 const app = express();
 const webUrl=process.env.WEB_URL||'http://127.0.0.1:8080';
@@ -534,6 +536,58 @@ app.post('/api/offers/send-now', requireAuth, asyncRoute(async(req:any,res:any)=
   res.status(201).json({count});
 }));
 
+// ---------- Clientes (atendimento no privado do WhatsApp) ----------
+const botView=(b:any)=>({...b,marketplaces:Array.isArray(b.marketplaces)&&b.marketplaces.length?b.marketplaces:['SHOPEE','MERCADO_LIVRE']});
+async function customersPayload(userId:string){
+  const bot=await getBot(userId);
+  const customers=await prisma.customer.findMany({where:{userId},orderBy:{lastSeenAt:'desc'},take:500,include:{requests:{orderBy:{createdAt:'desc'},take:1,select:{keyword:true,status:true,createdAt:true,text:true}}}});
+  const wa=getWaState();
+  return {bot:botView(bot),link:customerLink(bot),waConnected:wa.status==='connected',waNumber:wa.me?.id||null,
+    customers:customers.map(({requests,...c})=>({...c,lastRequest:requests[0]||null}))};
+}
+app.get('/api/customers', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await customersPayload(req.user.id))));
+app.put('/api/customers/bot', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({enabled:z.boolean().optional(),everyMinutes:z.coerce.number().int().min(1).max(1440).optional(),maxOffers:z.coerce.number().int().min(1).max(10).optional(),marketplaces:z.array(z.enum(['SHOPEE','MERCADO_LIVRE'])).min(1).max(2).optional(),sendCoupons:z.boolean().optional(),welcomeText:z.string().max(2000).optional().nullable(),linkText:z.string().max(120).optional().nullable()}).parse(req.body);
+  await getBot(req.user.id);
+  // A sessão do WhatsApp é uma só: ligar aqui desliga o atendimento de outro usuário que estivesse ligado.
+  if(body.enabled) await prisma.customerBot.updateMany({where:{userId:{not:req.user.id},enabled:true},data:{enabled:false}});
+  const data:any={...body}; if('welcomeText' in body) data.welcomeText=body.welcomeText?.trim()||null; if('linkText' in body) data.linkText=body.linkText?.trim()||null;
+  await prisma.customerBot.update({where:{userId:req.user.id},data});
+  res.json(await customersPayload(req.user.id));
+}));
+// QR code do link wa.me, para imprimir/postar.
+app.get('/api/customers/link-qr', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const link=customerLink(await getBot(req.user.id)); if(!link) return res.status(409).json({error:'WhatsApp não conectado.'});
+  res.json({link,qr:await QRCode.toDataURL(link,{margin:1,width:320})});
+}));
+// Testa como o robô entende uma frase (tela Clientes).
+app.post('/api/customers/parse', requireAuth, (req:any,res:any)=>{ const body=z.object({text:z.string().min(1).max(500)}).parse(req.body); res.json(parseIntent(body.text)); });
+app.get('/api/customers/:id/requests', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const c=await prisma.customer.findFirst({where:{id:req.params.id,userId:req.user.id}}); if(!c)return res.status(404).json({error:'Cliente não encontrado.'});
+  res.json(await prisma.customerRequest.findMany({where:{customerId:c.id},orderBy:{createdAt:'desc'},take:100}));
+}));
+app.patch('/api/customers/:id', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({blocked:z.boolean().optional(),optedOut:z.boolean().optional(),name:z.string().max(80).optional().nullable(),notes:z.string().max(1000).optional().nullable()}).parse(req.body);
+  const c=await prisma.customer.findFirst({where:{id:req.params.id,userId:req.user.id}}); if(!c)return res.status(404).json({error:'Cliente não encontrado.'});
+  res.json(await prisma.customer.update({where:{id:c.id},data:body}));
+}));
+app.delete('/api/customers/:id', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const c=await prisma.customer.findFirst({where:{id:req.params.id,userId:req.user.id}}); if(!c)return res.status(404).json({error:'Cliente não encontrado.'});
+  await prisma.customer.delete({where:{id:c.id}}); res.json({ok:true});
+}));
+// Envio manual para UM cliente: busca por palavra-chave (sem limite por tempo) ou texto livre.
+app.post('/api/customers/:id/send', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({keyword:z.string().trim().min(2).max(80).optional(),text:z.string().trim().min(1).max(2000).optional(),coupons:z.boolean().optional()}).parse(req.body);
+  const c=await prisma.customer.findFirst({where:{id:req.params.id,userId:req.user.id}}); if(!c)return res.status(404).json({error:'Cliente não encontrado.'});
+  if(c.optedOut) return res.status(409).json({error:'Este cliente pediu para não receber ofertas ("chega de oferta").'});
+  if(getWaState().status!=='connected') return res.status(409).json({error:'WhatsApp não conectado. Escaneie o QR code em Canais.'});
+  try{
+    if(body.keyword){ const n=await sendOffersTo(await getBot(req.user.id),c,body.keyword,{wantsCoupons:body.coupons,manual:true}); return res.json({count:n}); }
+    if(body.text){ await sendTextTo(c,body.text); return res.json({count:1}); }
+    res.status(400).json({error:'Informe uma palavra-chave ou um texto.'});
+  }catch(e:any){ res.status(400).json({error:e.message}); }
+}));
+
 // Usado pelo worker: a sessão do WhatsApp Web vive só neste processo.
 app.post('/internal/whatsapp/send', asyncRoute(async(req:any,res:any)=>{
   if(!process.env.JWT_SECRET || req.headers['x-internal-secret']!==process.env.JWT_SECRET) return res.status(401).json({error:'Não autorizado.'});
@@ -606,7 +660,7 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
-app.listen(Number(process.env.PORT||3333),()=>{ console.log('OfertasDaHora API em http://localhost:3333'); warmUpCategories(); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
+app.listen(Number(process.env.PORT||3333),()=>{ console.log('OfertasDaHora API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).

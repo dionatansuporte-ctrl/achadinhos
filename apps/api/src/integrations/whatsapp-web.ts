@@ -36,6 +36,23 @@ export function getWaState() {
   return { status, qr: qrDataUrl, me, error: lastError };
 }
 
+/** Mensagem de texto recebida no privado (grupos, status e as próprias mensagens ficam de fora). */
+export type WaIncoming = { jid: string; phone: string | null; name: string | null; text: string; at: Date };
+type IncomingHandler = (m: WaIncoming) => Promise<void> | void;
+const incomingHandlers: IncomingHandler[] = [];
+
+/** Registra quem trata mensagens recebidas (o atendimento a clientes usa isto). */
+export function onWhatsAppMessage(handler: IncomingHandler) {
+  incomingHandlers.push(handler);
+}
+
+function messageText(msg: any): string {
+  const m = msg?.message;
+  if (!m) return '';
+  const inner = m.ephemeralMessage?.message || m.viewOnceMessage?.message || m;
+  return String(inner.conversation || inner.extendedTextMessage?.text || inner.imageMessage?.caption || inner.videoMessage?.caption || '').trim();
+}
+
 export async function connectWhatsAppWeb(): Promise<void> {
   if (status === 'connected' || status === 'qr' || status === 'connecting') return;
   if (starting) return starting;
@@ -63,6 +80,24 @@ async function start() {
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  // Mensagens novas no privado: quem quiser tratá-las se registra em onWhatsAppMessage.
+  sock.ev.on('messages.upsert', ({ messages, type }) => {
+    if (type !== 'notify' || !incomingHandlers.length) return;
+    for (const msg of messages) {
+      const jid = msg.key?.remoteJid || '';
+      // Só conversa individual: nada de grupo (@g.us), status (@broadcast) nem mensagem enviada por nós.
+      if (msg.key?.fromMe || !jid || !(jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid'))) continue;
+      const text = messageText(msg);
+      if (!text) continue;
+      const phone = jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].split(':')[0] : null;
+      const at = msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date();
+      // Mensagem antiga (sincronização ao reconectar) não pode disparar resposta agora.
+      if (Date.now() - at.getTime() > 5 * 60_000) continue;
+      const m: WaIncoming = { jid, phone, name: msg.pushName || null, text, at };
+      for (const h of incomingHandlers) Promise.resolve(h(m)).catch(e => console.error('[whatsapp] mensagem recebida:', e?.message || e));
+    }
+  });
 
   sock.ev.on('connection.update', async (u) => {
     if (u.qr) {
@@ -115,6 +150,16 @@ export async function listGroups(): Promise<WaGroup[]> {
   return Object.values(all)
     .map(g => ({ id: g.id, name: g.subject || g.id, participants: g.participants?.length || 0 }))
     .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+}
+
+/** Mostra "digitando..." por alguns segundos antes de responder um cliente, para parecer natural. */
+export async function showTyping(jid: string, ms = 1500) {
+  if (!sock || status !== 'connected') return;
+  try {
+    await sock.sendPresenceUpdate('composing', jid);
+    await new Promise(r => setTimeout(r, ms));
+    await sock.sendPresenceUpdate('paused', jid);
+  } catch { /* só cosmético */ }
 }
 
 export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: string) {

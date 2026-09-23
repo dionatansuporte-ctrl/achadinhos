@@ -58,6 +58,7 @@ model User {
   sessions     Session[]
   coupons      Coupon[]
   couponSchedules CouponSchedule[]
+  customers    Customer[]
 }
 
 model Session {
@@ -251,6 +252,61 @@ model AutomationLog {
   automation   Automation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
   createdAt    DateTime    @default(now())
   @@index([automationId, createdAt])
+}
+
+// ---------- Atendimento a clientes no privado do WhatsApp ----------
+// O cliente clica no link wa.me, manda "quero oferta de fone bluetooth" e recebe as ofertas só ele.
+// Um cadastro por número (jid). optedOut = pediu "chega de oferta": não recebe mais nada até mandar "quero oferta".
+model Customer {
+  id            String    @id @default(cuid())
+  userId        String
+  jid           String
+  phone         String?
+  name          String?
+  notes         String?
+  blocked       Boolean   @default(false)
+  optedOut      Boolean   @default(false)
+  requestCount  Int       @default(0)
+  lastRequestAt DateTime?  // último pedido atendido (base do limite por tempo)
+  lastNoticeAt  DateTime?  // último aviso de "aguarde X minutos", para não avisar a cada mensagem
+  firstSeenAt   DateTime  @default(now())
+  lastSeenAt    DateTime  @default(now())
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  requests      CustomerRequest[]
+  @@unique([userId, jid])
+  @@index([userId, lastSeenAt])
+}
+
+// Cada mensagem do cliente que virou (ou tentou virar) um envio de ofertas.
+// status: ANSWERED (ofertas enviadas), EMPTY (nada encontrado), LIMITED (dentro do limite por tempo),
+// HELP (saudação/ajuda), OPT_OUT, OPT_IN, MANUAL (enviado pelo painel), FAILED.
+model CustomerRequest {
+  id         String   @id @default(cuid())
+  customerId String
+  text       String
+  keyword    String?
+  status     String
+  replyText  String?
+  offersJson Json?
+  error      String?
+  createdAt  DateTime @default(now())
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  @@index([customerId, createdAt])
+}
+
+// Configuração do atendimento (uma por usuário). everyMinutes = limite por tempo por cliente.
+model CustomerBot {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  enabled      Boolean  @default(false)
+  everyMinutes Int      @default(10)
+  maxOffers    Int      @default(3)
+  marketplaces Json?    // ["SHOPEE","MERCADO_LIVRE"]
+  sendCoupons  Boolean  @default(true)
+  welcomeText  String?
+  linkText     String?  // texto pré-preenchido no link wa.me
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 model AppSetting {
