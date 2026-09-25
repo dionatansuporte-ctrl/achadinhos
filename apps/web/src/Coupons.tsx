@@ -47,7 +47,7 @@ export default function Coupons() {
     setBusy('import');
     try {
       const r = await api.post(`/api/coupons/import-telegram/${mkt}`, { channel: sch?.telegramChannel });
-      notify(`Telegram: ${r.data.total} cupom(ns) na última mensagem, ${r.data.added} novo(s), ${r.data.removed} removido(s).`);
+      notify(`Telegram: ${r.data.total} cupom(ns) ativo(s) no(s) canal(is), ${r.data.added} novo(s), ${r.data.removed} removido(s).${r.data.errors?.length ? ` Falhou: ${r.data.errors.join(' | ')}` : ''}`);
       setData({ coupons: r.data.coupons, schedules: r.data.schedules });
     } catch (e: any) { notify(e?.response?.data?.error || 'Não foi possível importar do Telegram.', 'error'); }
     finally { setBusy(''); }
@@ -90,9 +90,9 @@ export default function Coupons() {
       <LinkField value={sch.link || ''} onSave={v => saveSchedule({ link: v })} placeholder={mkt === 'SHOPEE' ? 'https://shopee.com.br/user/voucher-wallet?...&utm_source=an_SEUID' : 'https://www.mercadolivre.com.br/cupons?matt_tool=SEUID'} />
       <p className="hint">Use o SEU link. O link que vem nas listas do Telegram é de outro afiliado e não conta comissão para você.</p>
 
-      <label>Canal público do Telegram para importar sozinho (opcional)</label>
+      <label>Canal público do Telegram para importar sozinho (opcional) <em>vários: separe por vírgula. Só entram os cupons ativos da loja: lista mais recente + alertas das últimas 24 h</em></label>
       <div className="form-row form-row-tight">
-        <LinkField value={sch.telegramChannel || ''} onSave={v => saveSchedule({ telegramChannel: v })} placeholder="melicupons" />
+        <LinkField value={sch.telegramChannel || ''} onSave={v => saveSchedule({ telegramChannel: v })} placeholder="melicupons, AlertaCupons" />
         <button type="button" className="outline" disabled={busy === 'import' || !sch.telegramChannel} onClick={importNow}><RefreshCw size={16} /> {busy === 'import' ? 'Importando...' : 'Importar agora'}</button>
       </div>
       <p className="hint">Antes de cada envio o robô lê a última mensagem do canal e deixa os cupons importados iguais a ela. Cupons que você digitou não mudam.</p>

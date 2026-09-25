@@ -57,7 +57,8 @@ export function couponListMessage(marketplace: Marketplace, coupons: CouponLine[
     '',
     ...(coupons.length ? coupons.map(couponLine) : [marketplace === 'SHOPEE' ? '💛 Resgate seu cupom 👇' : '💛 Veja os cupons do dia:']),
     '',
-    link ? (coupons.length ? '✅ Ative e compre por aqui:' : '👇 Pegue aqui:') : '',
+    // Sem cupom cadastrado a linha acima já aponta para o link; não repete a seta.
+    link && coupons.length ? '✅ Ative e compre por aqui:' : '',
     link || '',
     '',
     '⚠️ Cupons têm quantidade limitada e podem acabar antes do prazo.'
