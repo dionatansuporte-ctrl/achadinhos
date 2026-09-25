@@ -37,7 +37,9 @@ export function getWaState() {
 }
 
 /** Mensagem de texto recebida no privado (grupos, status e as próprias mensagens ficam de fora). */
-export type WaIncoming = { jid: string; phone: string | null; name: string | null; text: string; at: Date };
+// text vazio = mensagem sem texto (áudio, foto, figurinha...); `media` diz o que era.
+export type WaMedia = 'audio' | 'image' | 'video' | 'sticker' | 'document' | 'contact' | 'location';
+export type WaIncoming = { jid: string; phone: string | null; name: string | null; text: string; media: WaMedia | null; at: Date };
 type IncomingHandler = (m: WaIncoming) => Promise<void> | void;
 const incomingHandlers: IncomingHandler[] = [];
 
@@ -51,6 +53,21 @@ function messageText(msg: any): string {
   if (!m) return '';
   const inner = m.ephemeralMessage?.message || m.viewOnceMessage?.message || m;
   return String(inner.conversation || inner.extendedTextMessage?.text || inner.imageMessage?.caption || inner.videoMessage?.caption || '').trim();
+}
+
+/** Tipo de mídia de uma mensagem sem texto (áudio, foto...). null = nada que mereça resposta (reação, apagada, protocolo). */
+function messageMedia(msg: any): WaMedia | null {
+  const m = msg?.message;
+  if (!m) return null;
+  const inner = m.ephemeralMessage?.message || m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m;
+  if (inner.audioMessage) return 'audio';
+  if (inner.imageMessage) return 'image';
+  if (inner.videoMessage) return 'video';
+  if (inner.stickerMessage) return 'sticker';
+  if (inner.documentMessage || inner.documentWithCaptionMessage) return 'document';
+  if (inner.contactMessage || inner.contactsArrayMessage) return 'contact';
+  if (inner.locationMessage || inner.liveLocationMessage) return 'location';
+  return null;
 }
 
 export async function connectWhatsAppWeb(): Promise<void> {
@@ -89,12 +106,14 @@ async function start() {
       // Só conversa individual: nada de grupo (@g.us), status (@broadcast) nem mensagem enviada por nós.
       if (msg.key?.fromMe || !jid || !(jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid'))) continue;
       const text = messageText(msg);
-      if (!text) continue;
+      // Sem texto: áudio, foto, figurinha etc. também são entregues, para o cliente nunca ficar sem resposta.
+      const media = text ? null : messageMedia(msg);
+      if (!text && !media) continue;
       const phone = jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].split(':')[0] : null;
       const at = msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date();
       // Mensagem antiga (sincronização ao reconectar) não pode disparar resposta agora.
       if (Date.now() - at.getTime() > 5 * 60_000) continue;
-      const m: WaIncoming = { jid, phone, name: msg.pushName || null, text, at };
+      const m: WaIncoming = { jid, phone, name: msg.pushName || null, text, media, at };
       for (const h of incomingHandlers) Promise.resolve(h(m)).catch(e => console.error('[whatsapp] mensagem recebida:', e?.message || e));
     }
   });

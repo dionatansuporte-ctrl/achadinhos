@@ -10,7 +10,9 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 root = fso.GetParentFolderName(fso.GetParentFolderName(WScript.ScriptFullName))
 logs = root & "\logs"
 If Not fso.FolderExists(logs) Then fso.CreateFolder logs
-semWeb = (WScript.Arguments.Count > 0 And LCase(WScript.Arguments(0)) = "semweb")
+' VBScript nao faz curto-circuito no And: sem argumento, Arguments(0) estoura. Por isso o If separado.
+semWeb = False
+If WScript.Arguments.Count > 0 Then semWeb = (LCase(WScript.Arguments(0)) = "semweb")
 
 ' 0 = janela oculta. True = espera terminar (o banco sobe rapido).
 sh.Run "cmd /c call """ & root & "\tools\postgres.bat"" start >> """ & logs & "\postgres-start.log"" 2>&1", 0, True

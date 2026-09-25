@@ -11,13 +11,13 @@ import { notify } from './notify';
  */
 
 type Bot = { enabled: boolean; everyMinutes: number; maxOffers: number; marketplaces: Mkt[]; sendCoupons: boolean; welcomeText?: string | null; linkText?: string | null };
-type Customer = { id: string; jid: string; phone?: string | null; name?: string | null; notes?: string | null; blocked: boolean; optedOut: boolean; requestCount: number; lastRequestAt?: string | null; firstSeenAt: string; lastSeenAt: string; lastRequest?: { keyword?: string | null; status: string; createdAt: string; text: string } | null };
+type Customer = { id: string; jid: string; phone?: string | null; name?: string | null; givenName?: string | null; notes?: string | null; blocked: boolean; optedOut: boolean; requestCount: number; lastRequestAt?: string | null; firstSeenAt: string; lastSeenAt: string; lastRequest?: { keyword?: string | null; status: string; createdAt: string; text: string } | null };
 type Payload = { bot: Bot; link: string | null; waConnected: boolean; waNumber: string | null; customers: Customer[] };
 type Mkt = 'SHOPEE' | 'MERCADO_LIVRE';
 
 const INTERVALS = [[5, '5 min'], [10, '10 min'], [15, '15 min'], [30, '30 min'], [60, '1 h'], [120, '2 h'], [240, '4 h'], [720, '12 h'], [1440, '24 h']] as const;
 const STATUS: Record<string, [string, string]> = {
-  ANSWERED: ['Atendido', 'badge-on'], MANUAL: ['Enviado pelo painel', 'badge-on'], EMPTY: ['Nada encontrado', 'badge-ready'], LIMITED: ['Aguardando limite', 'badge-ready'],
+  ANSWERED: ['Atendido', 'badge-on'], COUPONS: ['Cupons enviados', 'badge-on'], ASK: ['Perguntou a loja', 'badge-ready'], DETAIL: ['Pediu detalhes', 'badge-ready'], ASK_NAME: ['Perguntou o nome', 'badge-ready'], NAME: ['Disse o nome', 'badge-on'], MEDIA: ['Mandou áudio/foto', 'badge-off'], MANUAL: ['Enviado pelo painel', 'badge-on'], EMPTY: ['Nada encontrado', 'badge-ready'], LIMITED: ['Aguardando limite', 'badge-ready'],
   HELP: ['Boas-vindas', 'badge-off'], OPT_OUT: ['Pediu para parar', 'badge-off'], OPT_IN: ['Voltou', 'badge-on'], BLOCKED: ['Bloqueado', 'badge-off'], FAILED: ['Falhou', 'badge-off']
 };
 const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
@@ -60,12 +60,13 @@ export default function Customers() {
     catch (e: any) { notify(e?.response?.data?.error || 'Não foi possível alterar.', 'error'); }
   }
   async function remove(c: Customer) {
-    if (!confirm(`Apagar ${c.name || phoneFmt(c)} e o histórico dele?`)) return;
+    if (!confirm(`Apagar ${c.givenName || c.name || phoneFmt(c)} e o histórico dele?`)) return;
     try { await api.delete(`/api/customers/${c.id}`); load(); } catch { notify('Não foi possível apagar.', 'error'); }
   }
 
-  const intentText = (i: any) => !i ? '' : i.kind === 'SEARCH' ? `Busca por "${i.keyword}"${i.wantsCoupons ? ' + cupons' : ''}` : i.kind === 'COUPONS' ? 'Só cupons' : i.kind === 'OPT_OUT' ? 'Cliente pede para parar (não recebe mais nada)' : i.kind === 'OPT_IN' ? 'Cliente volta a receber' : 'Boas-vindas / ajuda';
-  const list = (data?.customers || []).filter(c => { const f = filter.trim().toLowerCase(); return !f || (c.name || '').toLowerCase().includes(f) || (c.phone || '').includes(f.replace(/\D/g, '')) || (c.lastRequest?.keyword || '').toLowerCase().includes(f); });
+  const mktLabel = (m: string) => m === 'SHOPEE' ? 'Shopee' : m === 'MERCADO_LIVRE' ? 'Mercado Livre' : 'as duas lojas';
+  const intentText = (i: any) => !i ? '' : i.kind === 'SEARCH' ? (i.details ? `Pedido genérico: o robô pergunta ${i.details.items.map((x: string) => x.replace(/\s*\(.*$/, '')).join(', ')} de "${i.keyword}" e busca com a resposta` : `Busca por "${i.keyword}"${i.marketplace ? ` só na ${mktLabel(i.marketplace)}` : ''}${i.wantsCoupons ? ' + cupons' : ''}`) : i.kind === 'COUPONS' ? (i.marketplace ? `Cupons: ${mktLabel(i.marketplace)}` : 'Cupons (robô pergunta a loja)') : i.kind === 'MARKETPLACE' ? `Resposta "qual loja": ${mktLabel(i.marketplace)}` : i.kind === 'OPT_OUT' ? 'Cliente pede para parar (não recebe mais nada)' : i.kind === 'OPT_IN' ? 'Cliente volta a receber' : 'Boas-vindas / ajuda';
+  const list = (data?.customers || []).filter(c => { const f = filter.trim().toLowerCase(); return !f || (c.name || '').toLowerCase().includes(f) || (c.givenName || '').toLowerCase().includes(f) || (c.phone || '').includes(f.replace(/\D/g, '')) || (c.lastRequest?.keyword || '').toLowerCase().includes(f); });
 
   if (!data || !bot) return <section className="page"><h1>Clientes</h1><div className="loading">Carregando...</div></section>;
 
@@ -79,7 +80,7 @@ export default function Customers() {
         <label className="check-line" style={{ marginTop: 6 }}><input type="checkbox" checked={bot.enabled} onChange={e => saveBot({ enabled: e.target.checked })} /> Responder clientes automaticamente</label>
         <div className="env-field" style={{ marginTop: 16 }}><label><Clock3 size={15} /> Limite por tempo (por cliente)</label>
           <select value={bot.everyMinutes} onChange={e => saveBot({ everyMinutes: Number(e.target.value) })}>{INTERVALS.map(([v, l]) => <option key={v} value={v}>1 pedido a cada {l}</option>)}{!INTERVALS.some(([v]) => v === bot.everyMinutes) && <option value={bot.everyMinutes}>1 pedido a cada {bot.everyMinutes} min</option>}</select>
-          <small>Dentro desse tempo o cliente recebe só um aviso "posso buscar de novo em X min". Evita enxurrada e denúncia de spam.</small></div>
+          <small>Dentro desse tempo o cliente recebe só um aviso curto "posso buscar de novo em X min" (nunca fica sem resposta). Evita enxurrada e denúncia de spam.</small></div>
         <div className="env-field"><label>Ofertas por pedido <em>mais vendidos</em></label>
           <select value={bot.maxOffers} onChange={e => saveBot({ maxOffers: Number(e.target.value) })}>{[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n} {n === 1 ? 'oferta' : 'ofertas'}</option>)}</select></div>
         <div className="env-field"><label>Onde buscar</label>
@@ -87,7 +88,7 @@ export default function Customers() {
         <label className="check-line"><input type="checkbox" checked={bot.sendCoupons} onChange={e => saveBot({ sendCoupons: e.target.checked })} /> Se o cliente pedir cupom, manda o listão de cupons válidos junto</label>
         <div className="env-field" style={{ marginTop: 16 }}><label>Mensagem de boas-vindas <em>opcional</em></label>
           <textarea rows={5} value={bot.welcomeText || ''} placeholder={'Vazio = mensagem padrão (explica como pedir, como pedir cupom e como sair).'} onChange={e => setBot({ ...bot, welcomeText: e.target.value })} onBlur={() => { if ((bot.welcomeText || '') !== (data.bot.welcomeText || '')) saveBot({ welcomeText: bot.welcomeText || null }); }} /></div>
-        <p className="hint">Comandos que o cliente pode usar: <b>chega de oferta</b> (para de receber), <b>quero oferta</b> (volta a receber), <b>cupom</b> (só cupons). Pedido = qualquer texto, ex.: "fone bluetooth".</p>
+        <p className="hint">Comandos que o cliente pode usar: <b>chega de oferta</b> (para de receber), <b>quero oferta</b> (volta a receber), <b>cupom</b> (o robô pergunta "Shopee ou Mercado Livre?" e manda os cupons ativos da loja com seu link da tela Cupons, na hora, sem esperar o limite; <b>cupom shopee</b> pula a pergunta). Pedido = qualquer texto, ex.: "fone bluetooth". Pedido de uma palavra só ("tv", "celular", "furadeira"...) faz o robô perguntar tamanho, marca e modelo antes de buscar (os produtos mais comuns têm perguntas próprias); a resposta do cliente vira a busca ("tv 50 samsung 4k"). Toda mensagem recebe resposta, até áudio e foto ("escreva o produto"). Na primeira conversa o robô pergunta o nome do cliente e passa a chamá-lo pelo nome.</p>
       </div>
 
       <div className="card">
@@ -130,7 +131,7 @@ function CustomerRow({ c, open, onToggle, onPatch, onRemove, onSent, waConnected
 
   async function send(body: any) {
     setBusy('send');
-    try { const r = await api.post(`/api/customers/${c.id}/send`, body); notify(body.keyword ? `${r.data.count} oferta(s) enviada(s) para ${c.name || phoneFmt(c)}.` : 'Mensagem enviada.'); setKeyword(''); setText(''); onSent(); setReqs(null); api.get(`/api/customers/${c.id}/requests`).then(r => setReqs(r.data)).catch(() => {}); }
+    try { const r = await api.post(`/api/customers/${c.id}/send`, body); notify(body.keyword ? `${r.data.count} oferta(s) enviada(s) para ${c.givenName || c.name || phoneFmt(c)}.` : 'Mensagem enviada.'); setKeyword(''); setText(''); onSent(); setReqs(null); api.get(`/api/customers/${c.id}/requests`).then(r => setReqs(r.data)).catch(() => {}); }
     catch (e: any) { notify(e?.response?.data?.error || 'Não foi possível enviar.', 'error'); }
     finally { setBusy(''); }
   }
@@ -138,7 +139,7 @@ function CustomerRow({ c, open, onToggle, onPatch, onRemove, onSent, waConnected
 
   return <div className="user-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
     <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
-      <div className="user-main"><b>{c.name || phoneFmt(c)} {c.name && <small>· {phoneFmt(c)}</small>}</b>
+      <div className="user-main"><b>{c.givenName || c.name || phoneFmt(c)} {(c.givenName || c.name) && <small>· {c.givenName && c.name && c.name !== c.givenName ? `${c.name} · ` : ''}{phoneFmt(c)}</small>}</b>
         <small>{c.requestCount} pedido(s) · última mensagem {when(c.lastSeenAt)}{c.lastRequest?.keyword ? ` · pediu "${c.lastRequest.keyword}"` : ''}</small></div>
       {c.blocked && <span className="badge badge-off"><Ban size={13} /> Bloqueado</span>}
       {!c.blocked && c.optedOut && <span className="badge badge-off">Pediu para parar</span>}

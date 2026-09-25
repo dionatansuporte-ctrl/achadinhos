@@ -262,7 +262,9 @@ model Customer {
   userId        String
   jid           String
   phone         String?
-  name          String?
+  name          String?    // nome do perfil do WhatsApp (pushName)
+  givenName     String?    // nome que o cliente respondeu quando o robô perguntou
+  nameAskedAt   DateTime?  // quando o robô perguntou o nome (pergunta uma vez só)
   notes         String?
   blocked       Boolean   @default(false)
   optedOut      Boolean   @default(false)
@@ -279,7 +281,9 @@ model Customer {
 
 // Cada mensagem do cliente que virou (ou tentou virar) um envio de ofertas.
 // status: ANSWERED (ofertas enviadas), EMPTY (nada encontrado), LIMITED (dentro do limite por tempo),
-// HELP (saudação/ajuda), OPT_OUT, OPT_IN, MANUAL (enviado pelo painel), FAILED.
+// HELP (saudação/ajuda), OPT_OUT, OPT_IN, MANUAL (enviado pelo painel), FAILED, COUPONS (listão enviado),
+// ASK (perguntou a loja do cupom), DETAIL (pedido genérico: perguntou tamanho/marca/modelo), MEDIA (áudio/foto/figurinha),
+// BLOCKED (cliente bloqueado, sem resposta).
 model CustomerRequest {
   id         String   @id @default(cuid())
   customerId String
