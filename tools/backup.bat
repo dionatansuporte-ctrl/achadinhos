@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title OfertasDaHora - backup
+title Robo das Ofertas - backup
 echo Gerando backup completo (banco, credenciais, sessao do WhatsApp e codigo)...
 echo O PostgreSQL precisa estar ligado (OfertasDaHora.bat, opcao Iniciar).
 echo.

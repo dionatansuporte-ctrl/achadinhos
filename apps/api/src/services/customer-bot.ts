@@ -33,7 +33,9 @@ import { importTelegramCoupons } from './coupon-import';
  *     oferta mais certeira = compra mais fácil (pedido do usuário em 2026-09-25);
  *   - na primeira conversa o robô pergunta o nome ("como posso te chamar?") e usa a resposta nas
  *     mensagens seguintes (pedido do usuário em 2026-09-25); pergunta uma vez só, e quem responde
- *     com um pedido em vez do nome é atendido normalmente com o nome do perfil do WhatsApp;
+ *     com um pedido em vez do nome é atendido normalmente com o nome do perfil do WhatsApp.
+ *     No primeiro contato vai só a apresentação + "como posso te chamar?"; o texto de boas-vindas
+ *     (que manda digitar o produto) só depois do nome, pra não confundir (2026-09-26);
  *   - NENHUMA mensagem fica sem resposta: saudação repetida, mensagem dentro do limite, cliente
  *     que pediu "chega", áudio/foto/figurinha e até erro interno recebem pelo menos uma linha.
  *     Só bloqueado (botão da tela) é ignorado de propósito.
@@ -54,6 +56,11 @@ const DEFAULT_WELCOME = [
   'Quer cupons? Escreva *cupom* (ou *cupom shopee*, *cupom mercado livre*).',
   'Para não receber mais nada, escreva *chega de oferta*.'
 ].join('\n');
+
+// Primeiro contato sem pedido: só se apresenta e pede o nome. O texto de boas-vindas (que diz
+// "digite o nome do produto") vai depois da resposta, senão o cliente lê "digite o produto" e
+// "como posso te chamar?" na mesma mensagem e responde o produto (pedido do usuário em 2026-09-26).
+const FIRST_HELLO = 'Olá! 👋 Bem-vindo(a)! Sou o robô de ofertas, cupons e melhores preços. 🔥🛍️\n\nAntes de começar, me conta: como posso te chamar? 😊\n\n👉 Digite só o *seu nome* (o produto que você procura fica pra depois).';
 
 // "para" (preposição) fica de fora de propósito: "oferta para cozinha" não é pedido de saída.
 const OPT_OUT_RE = /\b(chega|parar|pare|cancelar?|sair|remover?|descadastrar|n[aã]o quero mais|stop)\b/i;
@@ -538,7 +545,7 @@ async function handleIncoming(m: WaIncoming) {
         ? `Oi! 😊 Já vou buscar *${intent.keyword}* pra você. Só antes, me conta: como posso te chamar?`
         : intent.kind === 'COUPONS'
           ? 'Oi! 😊 Já te mando os cupons. Só antes, me conta: como posso te chamar?'
-          : `${bot.welcomeText?.trim() || DEFAULT_WELCOME}\n\nAntes de começar, me conta: como posso te chamar? 😊`;
+          : FIRST_HELLO;
       await reply(m.jid, text);
       await prisma.customer.update({ where: { id: customer.id }, data: { nameAskedAt: new Date(), lastNoticeAt: new Date(), ...(intent.kind === 'OPT_IN' ? { optedOut: false } : {}) } });
       await log(customer.id, { text: m.text, keyword: request, status: 'ASK_NAME', replyText: text });
@@ -557,7 +564,8 @@ async function handleIncoming(m: WaIncoming) {
         await log(customer.id, { text: m.text, status: 'NAME', replyText: text });
         return handleIncoming({ ...m, text: pending.request });
       }
-      const text = `Prazer, ${first}! 😊 Agora me diga o produto que você procura (ex.: _tv 50 polegadas_, _fone bluetooth_) que eu busco as melhores ofertas pra você!`;
+      // Só agora vai o texto de boas-vindas (o da tela Clientes ou o padrão), que explica como pedir o produto.
+      const text = `Prazer, ${first}! 😊\n\n${bot.welcomeText?.trim() || DEFAULT_WELCOME}`;
       await reply(m.jid, text);
       await log(customer.id, { text: m.text, status: 'NAME', replyText: text });
       return;

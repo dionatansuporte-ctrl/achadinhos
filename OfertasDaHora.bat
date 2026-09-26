@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal
-title OfertasDaHora
+title Robo das Ofertas
 set "T=%~dp0tools"
 
 REM Atalhos por argumento (para atalhos do Windows, agendador ou arrastar um .zip):
@@ -19,7 +19,7 @@ if /i "%~x1"==".zip"        call "%T%\restaurar.bat" "%~1" & goto :eof
 cls
 echo.
 echo   ==========================================
-echo      OfertasDaHora
+echo      Robo das Ofertas
 echo   ==========================================
 echo.
 echo     1  Iniciar tudo (PostgreSQL, API, worker, painel)

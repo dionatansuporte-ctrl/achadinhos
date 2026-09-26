@@ -1,4 +1,4 @@
-' OfertasDaHora - sobe API, worker e painel SEM abrir janela nenhuma.
+' Robo das Ofertas - sobe API, worker e painel SEM abrir janela nenhuma.
 ' Clique duplo neste arquivo. A saida de cada processo vai para a pasta logs\.
 ' Para parar ou ligar junto com o Windows: OfertasDaHora.bat (na raiz).
 ' Uso avancado: cscript iniciar-oculto.vbs semweb  (nao sobe o painel web)
@@ -27,7 +27,7 @@ If Not JaRodando() Then
 End If
 
 ' Aviso discreto na bandeja (some sozinho). Nao bloqueia.
-sh.Popup "OfertasDaHora esta rodando em segundo plano." & vbCrLf & "Painel: http://127.0.0.1:8080" & vbCrLf & "Para parar, use OfertasDaHora.bat.", 6, "OfertasDaHora", 64
+sh.Popup "Robo das Ofertas esta rodando em segundo plano." & vbCrLf & "Painel: http://127.0.0.1:8080" & vbCrLf & "Para parar, use OfertasDaHora.bat.", 6, "Robo das Ofertas", 64
 
 Function JaRodando()
   Dim wmi, procs, p

@@ -91,7 +91,7 @@ async function start() {
     auth: state,
     logger,
     printQRInTerminal: false,
-    browser: ['OfertasDaHora', 'Chrome', '1.0'],
+    browser: ['Robô das Ofertas', 'Chrome', '1.0'],
     syncFullHistory: false,
     markOnlineOnConnect: false
   });

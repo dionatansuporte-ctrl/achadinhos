@@ -1,4 +1,4 @@
-# OfertasDaHora — projeto completo
+# Robô das Ofertas — projeto completo
 
 Projeto full-stack para automatizar achadinhos/ofertas de afiliados, inspirado no layout enviado: dashboard, listas, produtos, automações em 6 etapas, canais, histórico e configurações.
 

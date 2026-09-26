@@ -20,12 +20,12 @@ async function transport() {
 export async function sendMail(to: string, subject: string, text: string, html?: string) {
   const t = await transport();
   const from = (await getSecret('SMTP_FROM')) || (await getSecret('SMTP_USER'))!;
-  await t.sendMail({ from: from.includes('<') ? from : `OfertasDaHora <${from}>`, to, subject, text, html: html || `<pre style="font:15px system-ui">${text}</pre>` });
+  await t.sendMail({ from: from.includes('<') ? from : `Robô das Ofertas <${from}>`, to, subject, text, html: html || `<pre style="font:15px system-ui">${text}</pre>` });
 }
 
 export async function sendPasswordResetCode(to: string, code: string, minutes: number) {
   const text = [
-    'Recebemos um pedido para trocar a senha da sua conta OfertasDaHora.',
+    'Recebemos um pedido para trocar a senha da sua conta Robô das Ofertas.',
     '',
     `Seu código: ${code}`,
     '',
@@ -33,7 +33,7 @@ export async function sendPasswordResetCode(to: string, code: string, minutes: n
   ].join('\n');
   const html = `
     <div style="font-family:system-ui,Segoe UI,sans-serif;max-width:480px;margin:auto;padding:24px;color:#222">
-      <h2 style="margin:0 0 12px">Trocar senha · OfertasDaHora</h2>
+      <h2 style="margin:0 0 12px">Trocar senha · Robô das Ofertas</h2>
       <p>Recebemos um pedido para trocar a senha da sua conta.</p>
       <p style="margin:20px 0">Seu código:</p>
       <div style="font-size:34px;font-weight:800;letter-spacing:8px;background:#f3f4f6;border-radius:12px;padding:16px;text-align:center">${code}</div>

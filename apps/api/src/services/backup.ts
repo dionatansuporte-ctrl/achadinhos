@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 /**
- * Backup completo do OfertasDaHora em um .zip, para restaurar aqui ou em outra máquina:
+ * Backup completo do Robô das Ofertas em um .zip, para restaurar aqui ou em outra máquina:
  *   db.sql          → banco inteiro (pg_dump com DROP/CREATE, pronto para restaurar)
  *   config/api.env  → credenciais e a TOKEN_ENCRYPTION_KEY (sem ela, nada salvo em Configurações abre)
  *   config/web.env
@@ -102,7 +102,7 @@ export async function createBackup(kind: 'manual' | 'auto' = 'manual'): Promise<
     const wa = copyIfExists(path.join(ROOT, 'apps', 'api', '.wa-auth'), path.join(staging, 'wa-auth'));
     copySource(path.join(staging, 'source'));
     fs.writeFileSync(path.join(staging, 'manifest.json'), JSON.stringify({
-      app: 'OfertasDaHora', createdAt: now.toISOString(), kind, host: os.hostname(), dbBytes, whatsappSession: wa,
+      app: 'Robô das Ofertas', createdAt: now.toISOString(), kind, host: os.hostname(), dbBytes, whatsappSession: wa,
       restore: 'Arraste este .zip sobre o OfertasDaHora.bat (na raiz do projeto) ou use a opção Restaurar do menu. Em outra máquina: extraia source/ para uma pasta e faça o mesmo com o OfertasDaHora.bat de lá.'
     }, null, 2));
     zipFolder(staging, zipPath);

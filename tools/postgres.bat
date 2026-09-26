@@ -1,5 +1,5 @@
 @echo off
-REM OfertasDaHora - controla o PostgreSQL portatil (sem Docker).
+REM Robo das Ofertas - controla o PostgreSQL portatil (sem Docker).
 REM Uso: postgres.bat start | stop | status | psql
 REM O PostgreSQL fica na pasta "pgsql" ao lado da pasta do projeto
 REM (ex.: C:\Criar sites\pgsql). Para usar outro lugar, defina a variavel PGSQL_DIR.

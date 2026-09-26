@@ -1,4 +1,4 @@
-// OfertasDaHora - roda API, worker e painel numa janela só (pedido do usuário em 2026-09-26:
+// Robô das Ofertas - roda API, worker e painel numa janela só (pedido do usuário em 2026-09-26:
 // "1 prompt em vez de 4 telas"). Cada linha sai com o prefixo do processo e também vai para
 // logs\api.log, logs\worker.log e logs\web.log. Fechar a janela ou apertar Ctrl+C para os três.
 // Uso: node tools\rodar.js [semweb]   (semweb = não sobe o painel)
@@ -52,7 +52,7 @@ for (const s of servicos) {
 
 process.stdout.write([
   '',
-  '  OfertasDaHora rodando nesta janela: ' + servicos.map(s => s.nome).join(' + '),
+  '  Robô das Ofertas rodando nesta janela: ' + servicos.map(s => s.nome).join(' + '),
   '  Painel: http://127.0.0.1:8080   API: http://localhost:3333',
   '  Para parar tudo: feche esta janela, aperte Ctrl+C ou use OfertasDaHora.bat > Parar.',
   ''

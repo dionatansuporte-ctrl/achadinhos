@@ -1,13 +1,13 @@
 @echo off
 chcp 65001 >nul
 setlocal EnableDelayedExpansion
-title OfertasDaHora - restaurar backup
+title Robo das Ofertas - restaurar backup
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 if not defined PGSQL_DIR for %%I in ("%ROOT%\..\pgsql") do set "PGSQL_DIR=%%~fI"
 if not exist "%PGSQL_DIR%\bin\psql.exe" set "PGSQL_DIR=%ROOT%\pgsql"
 
 echo ================================================================
-echo   OfertasDaHora - RESTAURAR BACKUP
+echo   Robo das Ofertas - RESTAURAR BACKUP
 echo ================================================================
 echo.
 echo  Isto substitui o banco de dados, as credenciais (.env) e a sessao

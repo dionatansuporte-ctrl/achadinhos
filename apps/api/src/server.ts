@@ -69,7 +69,7 @@ app.post('/api/auth/register', asyncRoute(async (req:any,res:any)=>{
     if(await isMailConfigured()){
       const admins=await prisma.user.findMany({where:{role:{in:['MASTER','ADMIN']},status:'ACTIVE'},select:{email:true}});
       const link=`${process.env.WEB_URL||'http://127.0.0.1:8080'}/users`;
-      await Promise.all(admins.map(a=>sendMail(a.email,'Novo cadastro aguardando aprovação · OfertasDaHora',`${user.name} (${user.email}) pediu acesso ao OfertasDaHora.\n\nAprove ou recuse em: ${link}`).catch(()=>{})));
+      await Promise.all(admins.map(a=>sendMail(a.email,'Novo cadastro aguardando aprovação · Robô das Ofertas',`${user.name} (${user.email}) pediu acesso ao Robô das Ofertas.\n\nAprove ou recuse em: ${link}`).catch(()=>{})));
     }
   }catch{ /* e-mail é só aviso */ }
   res.status(201).json({pending:true,message:'Cadastro enviado! Assim que um administrador aprovar, você poderá entrar. Você recebe um e-mail quando isso acontecer.'});
@@ -108,7 +108,7 @@ app.patch('/api/users/:id', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const updated=await prisma.user.update({where:{id:target.id},data,select:{id:true,name:true,email:true,role:true,status:true,approvedAt:true,createdAt:true}});
   if(body.status && body.status!=='ACTIVE') await prisma.session.deleteMany({where:{userId:target.id}}); // derruba quem foi bloqueado
   if(body.status==='ACTIVE' && target.status==='PENDING'){
-    try{ if(await isMailConfigured()) await sendMail(target.email,'Seu acesso foi aprovado · OfertasDaHora',`Olá${target.name?`, ${target.name}`:''}! Seu cadastro no OfertasDaHora foi aprovado.\n\nEntre em: ${process.env.WEB_URL||'http://127.0.0.1:8080'}`); }catch{ /* aviso opcional */ }
+    try{ if(await isMailConfigured()) await sendMail(target.email,'Seu acesso foi aprovado · Robô das Ofertas',`Olá${target.name?`, ${target.name}`:''}! Seu cadastro no Robô das Ofertas foi aprovado.\n\nEntre em: ${process.env.WEB_URL||'http://127.0.0.1:8080'}`); }catch{ /* aviso opcional */ }
   }
   res.json(updated);
 }));
@@ -177,7 +177,7 @@ app.post('/api/auth/reset', asyncRoute(async(req:any,res:any)=>{
 }));
 // Teste do SMTP: manda um e-mail para o próprio usuário logado.
 app.post('/api/settings/email-test', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  try{ await sendMail(req.user.email,'Teste de e-mail · OfertasDaHora','Se você recebeu isto, o SMTP está funcionando.'); res.json({ok:true,message:`E-mail de teste enviado para ${req.user.email}.`}); }
+  try{ await sendMail(req.user.email,'Teste de e-mail · Robô das Ofertas','Se você recebeu isto, o SMTP está funcionando.'); res.json({ok:true,message:`E-mail de teste enviado para ${req.user.email}.`}); }
   catch(e:any){ res.status(502).json({error:e.message}); }
 }));
 
@@ -649,7 +649,7 @@ app.get('/api/integrations/mercadolivre/callback', asyncRoute(async(req:any,res:
   const token=await exchangeMercadoLivreCode(code,oauth.codeVerifier||undefined);
   await prisma.affiliateAccount.upsert({where:{userId_marketplace:{userId:oauth.userId,marketplace:'MERCADO_LIVRE'}},create:{userId:oauth.userId,marketplace:'MERCADO_LIVRE',displayName:'Mercado Livre',accessToken:encryptSecret(token.access_token),refreshToken:encryptSecret(token.refresh_token),expiresAt:new Date(Date.now()+token.expires_in*1000),externalUserId:String(token.user_id)},update:{accessToken:encryptSecret(token.access_token),refreshToken:encryptSecret(token.refresh_token),expiresAt:new Date(Date.now()+token.expires_in*1000),externalUserId:String(token.user_id)}});
   await prisma.oAuthState.update({where:{id:oauth.id},data:{consumedAt:new Date()}});
-  res.send('<h2>Mercado Livre conectado com sucesso.</h2><p>Você pode fechar esta janela e voltar ao OfertasDaHora.</p>');
+  res.send('<h2>Mercado Livre conectado com sucesso.</h2><p>Você pode fechar esta janela e voltar ao Robô das Ofertas.</p>');
 }));
 
 app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async(req:any,res:any)=>{
@@ -660,7 +660,7 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
-app.listen(Number(process.env.PORT||3333),()=>{ console.log('OfertasDaHora API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
+app.listen(Number(process.env.PORT||3333),()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).
@@ -673,5 +673,5 @@ try{
     fs.writeFileSync(keyFile,pems.private); fs.writeFileSync(certFile,pems.cert);
   }
   const httpsPort=Number(process.env.HTTPS_PORT||3443);
-  https.createServer({key:fs.readFileSync(keyFile),cert:fs.readFileSync(certFile)},app).listen(httpsPort,()=>console.log(`OfertasDaHora API (HTTPS p/ OAuth) em https://localhost:${httpsPort}`));
+  https.createServer({key:fs.readFileSync(keyFile),cert:fs.readFileSync(certFile)},app).listen(httpsPort,()=>console.log(`Robô das Ofertas API (HTTPS p/ OAuth) em https://localhost:${httpsPort}`));
 }catch(e:any){ console.error('HTTPS local não iniciado:',e.message); }

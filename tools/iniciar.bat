@@ -1,12 +1,12 @@
 @echo off
 chcp 65001 >nul
 setlocal EnableDelayedExpansion
-title OfertasDaHora - iniciar tudo
+title Robo das Ofertas - iniciar tudo
 cd /d "%~dp0.."
 if not exist logs mkdir logs
 
 echo ==========================================================
-echo   OfertasDaHora - subindo o projeto completo
+echo   Robo das Ofertas - subindo o projeto completo
 echo ==========================================================
 echo.
 
@@ -40,8 +40,8 @@ REM Uma janela so para os tres (pedido do usuario em 2026-09-26): tools\rodar.js
 REM painel com prefixo por linha e copia tudo para logs\api.log, worker.log e web.log.
 REM Caminho completo do rodar.js: e por ele que parar.bat acha o processo (procura "achadinhopro-final").
 REM cmd /c: quando o parar.bat derruba tudo, a janela fecha sozinha.
-start "OfertasDaHora" /min cmd /c "chcp 65001 >nul && title OfertasDaHora && cd /d "%~dp0.." && node "%~dp0rodar.js""
-echo   iniciados numa janela so, minimizada na barra de tarefas: "OfertasDaHora".
+start "Robo das Ofertas" /min cmd /c "chcp 65001 >nul && title Robo das Ofertas && cd /d "%~dp0.." && node "%~dp0rodar.js""
+echo   iniciados numa janela so, minimizada na barra de tarefas: "Robo das Ofertas".
 
 REM ---------- 4) Espera a API responder e abre o navegador ----------
 :abrir
@@ -54,7 +54,7 @@ if not errorlevel 1 goto api_ok
 set /a tentativas+=1
 if !tentativas! geq 45 (
   echo   a API demorou mais de 90 segundos.
-  if "!RODANDO!"=="1" (echo   Ela ja estava rodando antes e nao responde: use OfertasDaHora.bat opcao Parar e depois Iniciar de novo.) else (echo   Veja a janela "OfertasDaHora - API" na barra de tarefas.)
+  if "!RODANDO!"=="1" (echo   Ela ja estava rodando antes e nao responde: use OfertasDaHora.bat opcao Parar e depois Iniciar de novo.) else (echo   Veja a janela "Robo das Ofertas - API" na barra de tarefas.)
   goto fim
 )
 goto espera_api

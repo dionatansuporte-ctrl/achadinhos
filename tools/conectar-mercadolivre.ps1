@@ -10,7 +10,7 @@ $flag  = Join-Path $root 'apps\api\ml-redirect.txt'
 $callbackPath = '/api/integrations/mercadolivre/callback'
 
 Write-Host ''
-Write-Host '  OfertasDaHora - Conectar Mercado Livre' -ForegroundColor Yellow
+Write-Host '  Robô das Ofertas - Conectar Mercado Livre' -ForegroundColor Yellow
 Write-Host '  ======================================' -ForegroundColor Yellow
 Write-Host ''
 
@@ -45,7 +45,7 @@ Write-Host '  URL DE RETORNO (já copiada para a área de transferência):' -For
 Write-Host "  $callback" -ForegroundColor Cyan
 Write-Host ''
 Write-Host '  1) No DevCenter do Mercado Livre, cole essa URL em "URI de redirect" e salve.'
-Write-Host '  2) No OfertasDaHora > Configurações > Mercado Livre, clique em "Conectar" e autorize.'
+Write-Host '  2) No Robô das Ofertas > Configurações > Mercado Livre, clique em "Conectar" e autorize.'
 Write-Host '  3) Quando o card ficar "Conectado", volte aqui e pressione Enter para fechar o túnel.'
 Write-Host ''
 Write-Host '  Deixe esta janela aberta até terminar. A API já está usando esta URL de retorno.' -ForegroundColor DarkGray
