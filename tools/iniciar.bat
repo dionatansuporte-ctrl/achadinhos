@@ -36,10 +36,12 @@ if "!RODANDO!"=="1" (
   echo   ja estao rodando, nao vou subir de novo.
   goto abrir
 )
-start "OfertasDaHora - API"    /min cmd /k "chcp 65001 >nul && cd /d "%~dp0..\apps\api" && npm run dev"
-start "OfertasDaHora - Worker" /min cmd /k "chcp 65001 >nul && cd /d "%~dp0..\apps\api" && npm run worker"
-start "OfertasDaHora - Painel" /min cmd /k "chcp 65001 >nul && cd /d "%~dp0..\apps\web" && npm run dev"
-echo   iniciados em janelas minimizadas (barra de tarefas).
+REM Uma janela so para os tres (pedido do usuario em 2026-09-26): tools\rodar.js sobe API, worker e
+REM painel com prefixo por linha e copia tudo para logs\api.log, worker.log e web.log.
+REM Caminho completo do rodar.js: e por ele que parar.bat acha o processo (procura "achadinhopro-final").
+REM cmd /c: quando o parar.bat derruba tudo, a janela fecha sozinha.
+start "OfertasDaHora" /min cmd /c "chcp 65001 >nul && title OfertasDaHora && cd /d "%~dp0.." && node "%~dp0rodar.js""
+echo   iniciados numa janela so, minimizada na barra de tarefas: "OfertasDaHora".
 
 REM ---------- 4) Espera a API responder e abre o navegador ----------
 :abrir

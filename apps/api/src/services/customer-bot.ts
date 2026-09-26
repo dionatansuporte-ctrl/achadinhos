@@ -16,7 +16,10 @@ import { importTelegramCoupons } from './coupon-import';
  * ("quero oferta de fone bluetooth"). O robô busca na Shopee/Mercado Livre e responde
  * só para ele, com o link de afiliado. Regras pedidas pelo usuário:
  *   - limite por tempo: cada cliente é atendido no máximo uma vez a cada `everyMinutes`
- *     (evita enxurrada de mensagens e o WhatsApp marcar o número como spam);
+ *     (evita enxurrada de mensagens e o WhatsApp marcar o número como spam). Pedido dentro do
+ *     limite fica guardado (CustomerRequest LIMITED com keyword + loja) e sai SOZINHO quando o
+ *     limite passa, sem o cliente pedir de novo (pedido do usuário em 2026-09-26, ver
+ *     deliverPendingSearches);
  *   - pediu cupom? manda o listão de cupons válidos do Mercado Livre e da Shopee com o link do
  *     usuário (o mesmo da tela Cupons). Só cupom não passa pelo limite por tempo: é barato e quem
  *     pergunta "cupom" quer resposta na hora, não "volte em 8 min";
@@ -58,11 +61,13 @@ const OPT_IN_RE = /^\s*(quero\s+ofertas?|come[cç]ar|iniciar|voltar|ativar|start
 const GREETING_RE = /^\s*(oi+|ol[aá]|opa|e a[ií]|bom dia|boa tarde|boa noite|hey|hello|ajuda|help|menu|\?+)[\s!.,]*$/i;
 const COUPON_RE = /\bcupo(m|ns)\b|\bdesconto\b/i;
 // Palavras que só enfeitam o pedido: "quero uma oferta de fone bluetooth" -> "fone bluetooth".
-const FILLER_RE = /\b(quero|queria|gostaria|preciso|procuro|procurando|estou|to|tô|tem|teria|ter|me|manda|mande|mandar|envia|envie|enviar|traz|traga|trazer|ver|uma?|umas?|uns|o|a|os|as|de|do|da|dos|das|em|no|na|pra|para|por|favor|pfv|pf|ofert\w*|promo[cç][aã]o|promo[cç][oõ]es|promo|barato|barata|bom|boa|melhor|melhores|pre[cç]o|cupom|cupons|desconto|com|e|ou|algum|alguma|alguns|algumas|que|qual|quais|voc[eê]|vc|tu|ai|a[ií]|kkk+|rs|pode|ser|prefiro|ent[aã]o)\b/gi;
+const FILLER_RE = /\b(quero|queria|gostaria|preciso|procuro|procurando|estou|to|tô|tem|teria|ter|me|manda|mande|mandar|envia|envie|enviar|traz|traga|trazer|ver|uma?|umas?|uns|o|a|os|as|de|do|da|dos|das|em|no|na|pra|para|por|favor|pfv|pf|ofert\w*|promo[cç][aã]o|promo[cç][oõ]es|promo|barato|barata|bom|boa|melhor|melhores|pre[cç]o|cupom|cupons|desconto|com|e|ou|algum|alguma|alguns|algumas|que|qual|quais|voc[eê]|vc|tu|ai|a[ií]|kkk+|rs|pode|ser|prefiro|ent[aã]o|mesmo|mesma|so|somente|apenas|loja)\b|só(?=[\s.,!?]|$)/gi;
 
 // Loja citada pelo cliente: "cupom shopee", "oferta de fone no mercado livre", "os dois".
-const SHOPEE_RE = /\b(shopp?e+|shopi|xopee)\b/i;
-const ML_RE = /\bmercado\s*livre\b|\bmercadolivre\b|\bmeli\b|\bml\b/i;
+// Aceita os erros de escrita comuns: "shope", "shopi", "xopee", "mercado libre", "mercadolivre", "mercado" sozinho
+// (em 2026-09-26 um cliente respondeu "mercado libre" e o robô achou que era produto novo e perguntou a loja de novo).
+const SHOPEE_RE = /\b(shopp?e+|shopi|shopy|shop|xopee?|xopi|chopee)\b/i;
+const ML_RE = /\bmercado\s*li[bv]r[ei]s?\b|\bmercadoli[bv]r[ei]\b|\bmeli\b|\bml\b|\bmercad[oa]\b/i;
 const BOTH_RE = /\b(os dois|as duas|nos dois|nas duas|ambos|ambas|todos|todas|tanto faz|qualquer|nenhuma?|indiferente|os 2|2)\b/i;
 export type MarketplaceChoice = Marketplace | 'ALL';
 export function marketplaceIn(text: string): MarketplaceChoice | null {
@@ -73,6 +78,12 @@ export function marketplaceIn(text: string): MarketplaceChoice | null {
   return BOTH_RE.test(text) ? 'ALL' : null;
 }
 const stripMarketplace = (text: string) => text.replace(SHOPEE_RE, ' ').replace(ML_RE, ' ').replace(BOTH_RE, ' ');
+// Resposta numérica às perguntas de loja ("1", "opção 2", "3."): 1 = Shopee, 2 = Mercado Livre, 3 = qualquer uma.
+const NUMBER_CHOICE_RE = /^[^\p{L}\d]*(?:(?:a|o|op[cç][aã]o|n[uú]mero|escolho|quero)\s+)?([123])(?!\d)[^\p{L}\d]*$/iu;
+export function numberChoice(text: string): MarketplaceChoice | null {
+  const m = NUMBER_CHOICE_RE.exec(text);
+  return !m ? null : m[1] === '1' ? 'SHOPEE' : m[1] === '2' ? 'MERCADO_LIVRE' : 'ALL';
+}
 
 const fold = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -228,7 +239,7 @@ const vocative = (customer: { name?: string | null; givenName?: string | null })
 
 const minutesLeft = (since: Date, everyMinutes: number) => Math.max(1, Math.ceil((since.getTime() + everyMinutes * 60_000 - Date.now()) / 60_000));
 
-async function log(customerId: string, data: { text: string; keyword?: string | null; status: string; replyText?: string | null; offersJson?: any; error?: string | null }) {
+async function log(customerId: string, data: { text: string; keyword?: string | null; status: string; replyText?: string | null; offersJson?: any; error?: string | null; marketplace?: Marketplace | null }) {
   return prisma.customerRequest.create({ data: { customerId, ...data, offersJson: data.offersJson ?? undefined } });
 }
 
@@ -278,7 +289,7 @@ function chosenMarketplaces(bot: CustomerBot, choice?: MarketplaceChoice | null)
 
 /** Quanto tempo a pergunta "cupom de qual loja?" espera a resposta do cliente. */
 const ASK_TTL_MS = 15 * 60_000;
-const ASK_TEXT = '🎟️ Claro! Cupom de qual loja você quer?\n\nResponda *Shopee*, *Mercado Livre* ou *os dois*. 😊';
+const ASK_TEXT = '🎟️ Claro! Cupom de qual loja você quer?\n\n👉 *Escolher:*\n*1* 🛍️ Shopee\n*2* 🟡 Mercado Livre\n*3* 🔀 Os dois\n\nResponda com o número ou o nome da loja. 😊';
 
 /**
  * Responde "cupom": manda os listões da(s) loja(s) escolhida(s), ou avisa que não tem.
@@ -385,6 +396,9 @@ async function pendingStore(customerId: string) {
  */
 export function storeAnswer(pending: { keyword: string; wantsCoupons: boolean }, text: string, intent: Intent): SearchRequest | null {
   const base: SearchRequest = { keyword: pending.keyword, wantsCoupons: pending.wantsCoupons || COUPON_RE.test(text), marketplaceAsked: true };
+  // "1", "2" ou "3" (opções da pergunta) vêm antes de tudo: "2" sozinho também casa com BOTH_RE ("os 2").
+  const num = numberChoice(text);
+  if (num) return { ...base, ...(num !== 'ALL' ? { marketplace: num } : {}) };
   // "tanto faz", "não sei", "nenhuma preferência", "os dois": todas as lojas (mesma regra da pergunta de detalhes).
   if (SKIP_DETAIL_RE.test(text) || marketplaceIn(text) === 'ALL') return base;
   if (intent.kind === 'MARKETPLACE') return { ...base, ...(intent.marketplace !== 'ALL' ? { marketplace: intent.marketplace } : {}) };
@@ -397,7 +411,7 @@ export function storeAnswer(pending: { keyword: string; wantsCoupons: boolean },
 }
 /** Texto da pergunta "em qual loja?". */
 export function storeQuestion(keyword: string, customer: { name?: string | null; givenName?: string | null }) {
-  return `🛒 Em qual loja você quer que eu busque *${keyword}*${vocative(customer)}?\n\nResponda *Shopee*, *Mercado Livre* ou *qualquer uma*. 😊`;
+  return `🛒 Em qual loja você quer que eu busque *${keyword}*${vocative(customer)}?\n\n👉 *Escolher:*\n*1* 🛍️ Shopee\n*2* 🟡 Mercado Livre\n*3* 🔀 Qualquer uma\n\nResponda com o número ou o nome da loja. 😊`;
 }
 
 const storeName = (m: SearchMarketplace) => m === 'SHOPEE' ? 'na Shopee' : 'no Mercado Livre';
@@ -575,6 +589,12 @@ async function handleIncoming(m: WaIncoming) {
     if (pending) search = storeAnswer(pending, m.text, intent);
   }
 
+  // "1", "2" ou "3" respondendo à pergunta "cupom de qual loja?" (a da oferta já foi tratada em storeAnswer).
+  if (!search) {
+    const num = numberChoice(m.text);
+    if (num && await pendingAsk(customer.id)) { await sendCouponsTo(bot, customer, m.text, num); return; }
+  }
+
   if (!search && intent.kind === 'HELP') {
     // Saudação repetida dentro de 10 min ganha só uma linha, não o menu inteiro de novo.
     const repeated = !!customer.lastNoticeAt && Date.now() - customer.lastNoticeAt.getTime() < 10 * 60_000;
@@ -611,26 +631,9 @@ async function handleIncoming(m: WaIncoming) {
     search = { keyword: intent.keyword, wantsCoupons: intent.wantsCoupons, marketplace: intent.marketplace };
   }
 
-  // Limite por tempo: uma busca de ofertas por cliente a cada everyMinutes.
-  if (customer.lastRequestAt && Date.now() - customer.lastRequestAt.getTime() < bot.everyMinutes * 60_000) {
-    const left = minutesLeft(customer.lastRequestAt, bot.everyMinutes);
-    const keyword = search.keyword;
-    // Primeira vez na janela: aviso completo; depois, só uma linha, mas sempre responde.
-    const first = !customer.lastNoticeAt || customer.lastNoticeAt < customer.lastRequestAt;
-    const text = first
-      ? `Opa${vocative(customer)}! Acabei de te mandar ofertas há pouquinho. 😉 Em *${left} min* eu posso buscar de novo, aí te mando *${keyword}* na hora!`
-      : `Só mais *${left} min* e eu busco *${keyword}* pra você! 😊 Obrigado pela paciência.`;
-    await reply(m.jid, text);
-    if (first) await prisma.customer.update({ where: { id: customer.id }, data: { lastNoticeAt: new Date() } });
-    await log(customer.id, { text: m.text, keyword, status: 'LIMITED', replyText: text });
-    // Pediu oferta COM cupom: os cupons ele pode receber já; só a busca espera.
-    if (search.wantsCoupons) await sendCouponsTo(bot, customer, m.text, search.marketplace).catch(() => {});
-    return;
-  }
-
   // Sem a loja no pedido: pergunta "Shopee, Mercado Livre ou qualquer uma?" antes de buscar, se a
-  // opção está ligada e o robô usa as duas. Não gasta o limite por tempo (vem depois dele para o
-  // cliente não escolher a loja e só então ouvir "espera X min").
+  // opção está ligada e o robô usa as duas. Não gasta o limite por tempo e vem ANTES dele: a loja
+  // fica escolhida e, quando o limite passar, a busca sai sozinha já na loja certa.
   if (bot.askMarketplace !== false && !search.marketplace && !search.marketplaceAsked && botMarketplaces(bot).length > 1) {
     const text = storeQuestion(search.keyword, customer);
     await reply(m.jid, text);
@@ -638,13 +641,67 @@ async function handleIncoming(m: WaIncoming) {
     return;
   }
 
+  // Limite por tempo: uma busca de ofertas por cliente a cada everyMinutes. O pedido fica guardado
+  // (LIMITED, keyword + loja) e deliverPendingSearches manda as ofertas sozinho quando o limite passar.
+  if (customer.lastRequestAt && Date.now() - customer.lastRequestAt.getTime() < bot.everyMinutes * 60_000) {
+    const left = minutesLeft(customer.lastRequestAt, bot.everyMinutes);
+    const keyword = search.keyword;
+    // Primeira vez na janela: aviso completo; depois, só uma linha, mas sempre responde.
+    const first = !customer.lastNoticeAt || customer.lastNoticeAt < customer.lastRequestAt;
+    const text = first
+      ? `Opa${vocative(customer)}! Acabei de te mandar ofertas há pouquinho. 😉 Em *${left} min* eu busco *${keyword}* e te mando aqui automaticamente, sem precisar pedir de novo!`
+      : `Só mais *${left} min* e eu te mando *${keyword}* automaticamente! 😊 Não precisa pedir de novo.`;
+    await reply(m.jid, text);
+    if (first) await prisma.customer.update({ where: { id: customer.id }, data: { lastNoticeAt: new Date() } });
+    await log(customer.id, { text: m.text, keyword, status: 'LIMITED', replyText: text, marketplace: search.marketplace ?? null });
+    // Pediu oferta COM cupom: os cupons ele pode receber já; só a busca espera.
+    if (search.wantsCoupons) await sendCouponsTo(bot, customer, m.text, search.marketplace).catch(() => {});
+    return;
+  }
+
   // sendOffersTo já avisa o cliente ("Ops, não consegui buscar...") quando a busca falha.
   await sendOffersTo(bot, customer, search.keyword, { wantsCoupons: search.wantsCoupons, marketplace: search.marketplace, text: m.text }).catch(() => {});
 }
 
-// Fila por cliente: duas mensagens seguidas do mesmo número são tratadas uma depois da outra.
+/**
+ * Entrega automática depois do limite (pedido do usuário em 2026-09-26): quem ouviu "em X min eu te
+ * mando" recebe as ofertas sozinho quando o limite passa, sem pedir de novo. O pedido está no
+ * CustomerRequest LIMITED mais novo do cliente (keyword + loja escolhida). Ao entregar, o registro
+ * vira LIMITED_SENT (os LIMITED mais antigos do mesmo cliente também), para nunca repetir; se o
+ * cliente já pediu de novo depois do limite, o LIMITED antigo só é marcado. Roda a cada 30 s.
+ */
+async function deliverPendingSearches() {
+  const bot = await activeBot();
+  if (!bot || getWaState().status !== 'connected') return;
+  const pending = await prisma.customerRequest.findMany({
+    where: { status: 'LIMITED', keyword: { not: null }, createdAt: { gt: new Date(Date.now() - 24 * 60 * 60_000) }, customer: { userId: bot.userId, blocked: false, optedOut: false } },
+    orderBy: { createdAt: 'desc' },
+    include: { customer: true }
+  });
+  const seen = new Set<string>();
+  for (const r of pending) {
+    const c = r.customer;
+    // Só o pedido mais novo de cada cliente vale; pedido anterior à última entrega já foi atendido.
+    const superseded = seen.has(c.id) || (!!c.lastRequestAt && c.lastRequestAt > r.createdAt);
+    seen.add(c.id);
+    if (superseded) { await prisma.customerRequest.update({ where: { id: r.id }, data: { status: 'LIMITED_SENT' } }); continue; }
+    if (c.lastRequestAt && Date.now() - c.lastRequestAt.getTime() < bot.everyMinutes * 60_000) continue; // ainda dentro do limite
+    // Marca antes de enviar: se a busca falhar, sendOffersTo avisa o cliente e registra FAILED (não fica tentando para sempre).
+    await prisma.customerRequest.update({ where: { id: r.id }, data: { status: 'LIMITED_SENT' } });
+    enqueue(c.jid, () => sendOffersTo(bot, c, r.keyword!, { marketplace: r.marketplace ?? undefined, text: `(automático) ${r.text}` }).then(() => undefined));
+  }
+}
+
+// Fila por cliente: duas mensagens seguidas do mesmo número (ou a entrega automática) são tratadas uma depois da outra.
 const chains = new Map<string, Promise<void>>();
+function enqueue(jid: string, task: () => Promise<void>) {
+  const prev = chains.get(jid) || Promise.resolve();
+  const next = prev.then(task).catch(e => console.error('[clientes]', e?.message || e)).finally(() => { if (chains.get(jid) === next) chains.delete(jid); });
+  chains.set(jid, next);
+  return next;
+}
 export function startCustomerBot() {
+  setInterval(() => deliverPendingSearches().catch(e => console.error('[clientes] entrega automática:', e?.message || e)), 30_000);
   onWhatsAppMessage(m => {
     const prev = chains.get(m.jid) || Promise.resolve();
     const next = prev.then(() => handleIncoming(m)).catch(async e => {

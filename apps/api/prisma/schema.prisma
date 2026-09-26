@@ -292,6 +292,7 @@ model CustomerRequest {
   status     String
   replyText  String?
   offersJson Json?
+  marketplace Marketplace? // loja escolhida no pedido que ficou esperando o limite (LIMITED): a entrega automática usa
   error      String?
   createdAt  DateTime @default(now())
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
