@@ -37,6 +37,11 @@ if not exist "%PGDATA%\PG_VERSION" (
 )
 "%PGBIN%\pg_isready.exe" -h localhost -p 5432 >nul 2>&1
 if not errorlevel 1 (echo   PostgreSQL ja estava ligado. & exit /b 0)
+REM Servidor morto, mas com processo filho orfao segurando a porta 5432 e a memoria compartilhada
+REM (aconteceu em 2026-09-26: o console do servidor recebeu Ctrl+C no meio de uma consulta e o
+REM desligamento travou). Nesse estado o pg_ctl nao sobe de novo. Se o PID do postmaster.pid ja nao
+REM existe, encerra os orfaos desta instalacao antes de tentar.
+if exist "%PGDATA%\postmaster.pid" powershell -NoProfile -ExecutionPolicy Bypass -Command "$pm = [int](Get-Content '%PGDATA%\postmaster.pid' -TotalCount 1); if (-not (Get-Process -Id $pm -ErrorAction SilentlyContinue)) { Get-CimInstance Win32_Process -Filter \"Name='postgres.exe'\" | Where-Object { ($_.CommandLine -replace '/','\') -like ('*' + '%PGBIN%\postgres.exe' + '*') } | ForEach-Object { Write-Host ('  encerrando processo orfao do PostgreSQL (PID ' + $_.ProcessId + ')'); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep 1 }"
 "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%ROOT%\logs\postgres.log" -w -t 60 start >nul 2>&1
 "%PGBIN%\pg_isready.exe" -h localhost -p 5432 >nul 2>&1
 if errorlevel 1 (echo   ERRO: o PostgreSQL nao subiu. Veja logs\postgres.log & exit /b 1)

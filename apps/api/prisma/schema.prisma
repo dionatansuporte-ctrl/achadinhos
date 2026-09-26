@@ -306,6 +306,7 @@ model CustomerBot {
   everyMinutes Int      @default(10)
   maxOffers    Int      @default(3)
   marketplaces Json?    // ["SHOPEE","MERCADO_LIVRE"]
+  askMarketplace Boolean @default(true) // pergunta "Shopee, Mercado Livre ou qualquer uma?" antes de buscar
   sendCoupons  Boolean  @default(true)
   welcomeText  String?
   linkText     String?  // texto pré-preenchido no link wa.me

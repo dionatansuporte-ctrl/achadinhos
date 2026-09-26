@@ -547,7 +547,7 @@ async function customersPayload(userId:string){
 }
 app.get('/api/customers', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await customersPayload(req.user.id))));
 app.put('/api/customers/bot', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({enabled:z.boolean().optional(),everyMinutes:z.coerce.number().int().min(1).max(1440).optional(),maxOffers:z.coerce.number().int().min(1).max(10).optional(),marketplaces:z.array(z.enum(['SHOPEE','MERCADO_LIVRE'])).min(1).max(2).optional(),sendCoupons:z.boolean().optional(),welcomeText:z.string().max(2000).optional().nullable(),linkText:z.string().max(120).optional().nullable()}).parse(req.body);
+  const body=z.object({enabled:z.boolean().optional(),everyMinutes:z.coerce.number().int().min(1).max(1440).optional(),maxOffers:z.coerce.number().int().min(1).max(10).optional(),marketplaces:z.array(z.enum(['SHOPEE','MERCADO_LIVRE'])).min(1).max(2).optional(),askMarketplace:z.boolean().optional(),sendCoupons:z.boolean().optional(),welcomeText:z.string().max(2000).optional().nullable(),linkText:z.string().max(120).optional().nullable()}).parse(req.body);
   await getBot(req.user.id);
   // A sessão do WhatsApp é uma só: ligar aqui desliga o atendimento de outro usuário que estivesse ligado.
   if(body.enabled) await prisma.customerBot.updateMany({where:{userId:{not:req.user.id},enabled:true},data:{enabled:false}});
