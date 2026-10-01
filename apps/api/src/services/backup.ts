@@ -17,6 +17,8 @@ import { spawnSync } from 'node:child_process';
 export const ROOT = path.resolve(__dirname, '..', '..', '..', '..'); // <root>/apps/api/src/services → <root>
 export const BACKUP_DIR = path.join(ROOT, 'backups');
 const KEEP = 15;
+/** Intervalo do backup automático, em dias. Ao gerar um novo, os automáticos anteriores são apagados. */
+export const AUTO_EVERY_DAYS = 5;
 
 export type BackupInfo = { file: string; size: number; createdAt: Date; kind: 'manual' | 'auto' };
 
@@ -122,14 +124,16 @@ export function listBackups(): BackupInfo[] {
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 }
 
-/** Mantém os KEEP mais recentes; os manuais dos últimos 30 dias nunca são apagados. */
+/**
+ * Automáticos: fica só o mais recente (o antigo só sai depois que o novo ficou pronto).
+ * Manuais: mantém os KEEP mais recentes; os dos últimos 30 dias nunca são apagados.
+ */
 function prune() {
   const all = listBackups();
   const cutoff = Date.now() - 30 * 86_400_000;
-  all.slice(KEEP).forEach(b => {
-    if (b.kind === 'manual' && b.createdAt.getTime() > cutoff) return;
-    try { fs.unlinkSync(path.join(BACKUP_DIR, b.file)); } catch { /* ignora */ }
-  });
+  const remove = (b: BackupInfo) => { try { fs.unlinkSync(path.join(BACKUP_DIR, b.file)); } catch { /* ignora */ } };
+  all.filter(b => b.kind === 'auto').slice(1).forEach(remove);
+  all.filter(b => b.kind === 'manual').slice(KEEP).forEach(b => { if (b.createdAt.getTime() <= cutoff) remove(b); });
 }
 
 export function backupPath(file: string) {
@@ -141,8 +145,13 @@ export function backupPath(file: string) {
 
 export function deleteBackup(file: string) { fs.unlinkSync(backupPath(file)); }
 
-/** Já existe backup automático de hoje (fuso de SP)? */
-export function hasAutoBackupToday() {
-  const today = stamp(new Date()).slice(0, 8);
-  return listBackups().some(b => b.kind === 'auto' && b.file.includes(`-${today}`));
+/** AAAAMMDD → número do dia, para contar dias de calendário. */
+const dayNumber = (ymd: string) => Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)) / 86_400_000;
+
+/** Já passaram AUTO_EVERY_DAYS dias (fuso de SP) desde o último backup automático? */
+export function isAutoBackupDue() {
+  const last = listBackups().find(b => b.kind === 'auto');
+  if (!last) return true;
+  const lastDay = last.file.slice('ofertasdahora-'.length, 'ofertasdahora-'.length + 8);
+  return dayNumber(stamp(new Date()).slice(0, 8)) - dayNumber(lastDay) >= AUTO_EVERY_DAYS;
 }

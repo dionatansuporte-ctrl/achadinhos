@@ -1,6 +1,6 @@
 import { prisma } from '../db';
 import { runAutomation, type ScheduleJson } from './automation-runner';
-import { createBackup, hasAutoBackupToday } from './backup';
+import { createBackup, isAutoBackupDue, AUTO_EVERY_DAYS } from './backup';
 import { tickCoupons } from './coupons';
 
 /**
@@ -44,14 +44,14 @@ export function describeSchedule(schedule: ScheduleJson | null | undefined): str
   return `a cada ${every}${win}`;
 }
 
-/** Backup automático uma vez por dia, entre 03:00 e 05:59 (SP), quando o sistema está ocioso. */
+/** Backup automático a cada AUTO_EVERY_DAYS dias (o anterior é apagado), entre 03:00 e 05:59 (SP), quando o sistema está ocioso. */
 async function autoBackup() {
   const m = minutesOfDay(new Date(), 'America/Sao_Paulo');
   if (m < 3 * 60 || m >= 6 * 60) return;
-  if (hasAutoBackupToday()) return;
+  if (!isAutoBackupDue()) return;
   try {
     const b = await createBackup('auto');
-    console.log(`[backup] automático criado: ${b.file}`);
+    console.log(`[backup] automático criado: ${b.file} (próximo em ${AUTO_EVERY_DAYS} dias)`);
   } catch (e: any) {
     console.error('[backup] automático falhou:', e.message);
     await prisma.automationLog.create({ data: { action: 'BACKUP', status: 'ERROR', message: e.message } }).catch(() => {});
