@@ -43,9 +43,19 @@ REM (aconteceu em 2026-09-26: o console do servidor recebeu Ctrl+C no meio de um
 REM desligamento travou). Nesse estado o pg_ctl nao sobe de novo. Se o PID do postmaster.pid ja nao
 REM existe, encerra os orfaos desta instalacao antes de tentar.
 if exist "%PGDATA%\postmaster.pid" powershell -NoProfile -ExecutionPolicy Bypass -Command "$pm = [int](Get-Content '%PGDATA%\postmaster.pid' -TotalCount 1); if (-not (Get-Process -Id $pm -ErrorAction SilentlyContinue)) { Get-CimInstance Win32_Process -Filter \"Name='postgres.exe'\" | Where-Object { ($_.CommandLine -replace '/','\') -like ('*' + '%PGBIN%\postgres.exe' + '*') } | ForEach-Object { Write-Host ('  encerrando processo orfao do PostgreSQL (PID ' + $_.ProcessId + ')'); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep 1 }"
-"%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%ROOT%\logs\postgres.log" -w -t 60 start >nul 2>&1
+REM O servidor sobe num console PROPRIO e oculto (Start-Process -WindowStyle Hidden). Antes ele herdava o
+REM console de quem chamou (menu, iniciar.bat): Ctrl+C ou fechar aquela janela derrubava uma consulta no
+REM meio (0xC000013A) e o banco entrava em recuperacao (2026-09-26 e 2026-10-01). Sem -Wait: com ele trava.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PGBIN%\pg_ctl.exe' -ArgumentList @('-D','\"%PGDATA%\"','-l','\"%ROOT%\logs\postgres.log\"','start') -WindowStyle Hidden"
+set /a TENT=0
+:espera
 "%PGBIN%\pg_isready.exe" -h localhost -p 5432 >nul 2>&1
-if errorlevel 1 (echo   ERRO: o PostgreSQL nao subiu. Veja logs\postgres.log & exit /b 1)
+if not errorlevel 1 goto pronto
+set /a TENT+=1
+if %TENT% geq 60 (echo   ERRO: o PostgreSQL nao subiu. Veja logs\postgres.log & exit /b 1)
+ping -n 2 127.0.0.1 >nul
+goto espera
+:pronto
 call "%~dp0db-env.bat"
 "%PGBIN%\psql.exe" -h localhost -U postgres -d postgres -Atq -c "SELECT 1 FROM pg_database WHERE datname='achadinhopro'" 2>nul | findstr /x 1 >nul
 if errorlevel 1 (

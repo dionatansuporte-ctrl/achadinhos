@@ -1,6 +1,7 @@
 import { prisma } from '../db';
 import { runAutomation, type ScheduleJson } from './automation-runner';
 import { createBackup, isAutoBackupDue, AUTO_EVERY_DAYS } from './backup';
+import { cleanupDatabase, isCleanupDue, CLEANUP_EVERY_DAYS } from './cleanup';
 import { tickCoupons } from './coupons';
 
 /**
@@ -44,6 +45,22 @@ export function describeSchedule(schedule: ScheduleJson | null | undefined): str
   return `a cada ${every}${win}`;
 }
 
+/** Limpeza da base a cada CLEANUP_EVERY_DAYS dias, na mesma janela da madrugada. */
+async function autoCleanup() {
+  if (!(await isCleanupDue())) return;
+  backupRunning = true;
+  try {
+    const r = await cleanupDatabase();
+    console.log(`[limpeza] ${r.logs} log(s), ${r.jobs} envio(s), ${r.conversations} conversa(s), ${r.sessions + r.codes} sessão(ões)/código(s), ${r.files} arquivo(s) (próxima em ${CLEANUP_EVERY_DAYS} dias)`);
+  } catch (e: any) {
+    backupFailedAt = Date.now();
+    console.error('[limpeza] falhou:', e.message);
+    await prisma.automationLog.create({ data: { action: 'CLEANUP', status: 'ERROR', message: e.message } }).catch(() => {});
+  } finally {
+    backupRunning = false;
+  }
+}
+
 /** Backup automático a cada AUTO_EVERY_DAYS dias (o anterior é apagado), entre 03:00 e 05:59 (SP), quando o sistema está ocioso. */
 // Falhou? Tenta de novo só depois de 1 h (antes eram ~180 tentativas, uma por minuto, até as 6h).
 let backupRunning = false;
@@ -52,7 +69,8 @@ async function autoBackup() {
   const m = minutesOfDay(new Date(), 'America/Sao_Paulo');
   if (m < 3 * 60 || m >= 6 * 60) return;
   if (backupRunning || Date.now() - backupFailedAt < 60 * 60_000) return;
-  if (!isAutoBackupDue()) return;
+  // Backup em dia: é a vez da limpeza (sempre depois do backup, para o zip guardar o que vai ser apagado).
+  if (!isAutoBackupDue()) { await autoCleanup(); return; }
   backupRunning = true;
   try {
     const b = await createBackup('auto');

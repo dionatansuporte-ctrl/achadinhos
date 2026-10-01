@@ -4,6 +4,7 @@ import { matchesRules } from './rules';
 import { productCoupons, pickCoupon } from './coupons';
 import { hasShopeeSearch, syncShopeeProducts, searchMarketplaceLabel, describeSearch } from './shopee-sync';
 import { titleKey, titleWords, titleSimilarity, TITLE_SIMILAR_MIN } from './title-key';
+import { roundCount } from './cleanup';
 
 /**
  * Executa uma automação: escolhe produtos, monta a mensagem e coloca os envios na fila.
@@ -164,7 +165,8 @@ async function runAutomationNow(automationId: string, opts: { source: 'manual' |
     const minDiscount = (rules as any).minDiscount;
     // Rodízio de termos: o nº de rodadas anteriores desta automação diz qual bloco de termos usar agora,
     // para que todos os termos da lista apareçam ao longo do dia, não só os primeiros.
-    const keywordCursor = await prisma.automationLog.count({ where: { automationId: a.id, action: { in: ['RUN', 'GENERATE_JOBS'] } } });
+    // roundCount soma as rodadas que a limpeza de 5 em 5 dias já apagou (linha CURSOR), para o rodízio não voltar ao começo.
+    const keywordCursor = await roundCount(a.id);
     const rule = { ...rules.shopeeSearch, minDiscount: typeof minDiscount === 'number' ? minDiscount : undefined, keywordCursor };
     for (let page = 1; page <= MAX_SHOPEE_PAGES && fresh_.length < wanted; page++) {
       let found: any[];
