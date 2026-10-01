@@ -10,6 +10,7 @@ datasource db {
 enum Marketplace {
   SHOPEE
   MERCADO_LIVRE
+  AMAZON
 }
 enum ChannelType {
   WHATSAPP

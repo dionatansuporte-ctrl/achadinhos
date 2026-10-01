@@ -144,13 +144,14 @@ export async function fetchTelegramChannel(channel: string): Promise<TelegramPos
 
 /**
  * De qual loja é o post. Canal misto (@AlertaCupons) fala "SHOPEE"/"MERCADO LIVRE" ou traz o
- * link da loja; post de outra loja (Magalu, Amazon...) é OTHER; sem pista nenhuma é null
+ * link da loja; post de outra loja (Magalu, AliExpress...) é OTHER; sem pista nenhuma é null
  * (canal dedicado como @melicupons, que não repete o nome da loja).
  */
 export function postMarketplace(text: string): Marketplace | 'OTHER' | null {
   if (/shopee|shope\b|s\.shopee\.com/i.test(text)) return 'SHOPEE';
   if (/mercado\s*livre|mercadolivre|mercadolibre|\bmeli\b|\bml\b/i.test(text)) return 'MERCADO_LIVRE';
-  if (/magalu|magazine\s*luiza|magazinevoce|amazon|amzn|americanas|aliexpress|casas\s*bahia|kabum|netshoes|centauro|natura|boticario|ifood|temu|shein/i.test(text)) return 'OTHER';
+  if (/amazon|amzn\.to|\ba\.co\//i.test(text)) return 'AMAZON';
+  if (/magalu|magazine\s*luiza|magazinevoce|americanas|aliexpress|casas\s*bahia|kabum|netshoes|centauro|natura|boticario|ifood|temu|shein/i.test(text)) return 'OTHER';
   return null;
 }
 

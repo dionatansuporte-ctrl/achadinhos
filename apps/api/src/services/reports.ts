@@ -76,6 +76,7 @@ export async function salesReport(period: Period) {
     period, start, end,
     shopee,
     mercadolivre: { available: false, reason: 'O Mercado Livre não disponibiliza vendas e comissões de afiliado por API.', portal: 'https://www.mercadolivre.com.br/afiliados/hub' },
+    amazon: { available: false, reason: 'A Amazon não disponibiliza vendas e comissões de associado por API; veja os relatórios no portal.', portal: 'https://associados.amazon.com.br/home/reports' },
     updatedAt: new Date()
   };
   if (shopee.available) cache.set(key, { at: Date.now(), data });

@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ClipboardPaste, Plus, Search, Send, SlidersHorizontal, X } from 'lucide-react';
 import { api } from './api';
-import { parseOffers, toAffiliateUrl, type ParsedOffer } from './offers';
+import { parseOffers, toAffiliateUrl, amazonLink, type ParsedOffer } from './offers';
+import { mktName } from './marketplaces';
 
 import { brl, parseBr, typingMoney, blurMoney } from './money';
 
@@ -31,11 +32,11 @@ export default function Capture() {
     api.get('/api/channels').then(r => setChannels(r.data.filter((c: any) => c.enabled))).catch(() => {});
     api.get('/api/integrations/settings').then(r => {
       const find = (k: string) => r.data.settings.find((s: any) => s.key === k)?.masked || '';
-      setSuffix({ SHOPEE: find('SHOPEE_AFFILIATE_SUFFIX'), MERCADO_LIVRE: find('ML_AFFILIATE_SUFFIX') });
+      setSuffix({ SHOPEE: find('SHOPEE_AFFILIATE_SUFFIX'), MERCADO_LIVRE: find('ML_AFFILIATE_SUFFIX'), AMAZON: find('AMAZON_PARTNER_TAG') });
     }).catch(() => {});
   }, []);
 
-  const linkOf = (o: ParsedOffer) => toAffiliateUrl(o.productUrl, suffix[o.marketplace]);
+  const linkOf = (o: ParsedOffer) => o.marketplace === 'AMAZON' ? amazonLink(o.productUrl, suffix.AMAZON) : toAffiliateUrl(o.productUrl, suffix[o.marketplace]);
 
   // Extração automática: sem botão "Extrair", o resultado acompanha o texto colado.
   const offers = useMemo(() => parseOffers(text).filter(o => !done[o.id]), [text, done]);
@@ -68,7 +69,10 @@ export default function Capture() {
     let ok = 0; const fails: string[] = []; const ids: string[] = []; const doneNow: Record<string, boolean> = {};
     for (const o of selected) {
       try {
-        const r = await api.post('/api/products/import/manual', {
+        // Amazon: a API abre o link curto (amzn.to) e troca a tag de quem postou pela sua.
+        const r = o.marketplace === 'AMAZON' ? await api.post('/api/products/import/amazon', {
+          url: o.productUrl, title: o.title, price: o.price, oldPrice: o.oldPrice, couponText: o.coupon
+        }) : await api.post('/api/products/import/manual', {
           marketplace: o.marketplace === 'MERCADO_LIVRE' ? 'MERCADO_LIVRE' : 'SHOPEE',
           title: o.title,
           productUrl: o.productUrl,
@@ -120,7 +124,7 @@ export default function Capture() {
           {text
             ? <button className="outline" onClick={clear}><X size={16} /> Limpar</button>
             : <span className="hint" style={{ margin: 0 }}><ClipboardPaste size={15} /> Basta colar: não precisa clicar em nada.</span>}
-          {!suffix.SHOPEE && !suffix.MERCADO_LIVRE && (
+          {!suffix.SHOPEE && !suffix.MERCADO_LIVRE && !suffix.AMAZON && (
             <span className="hint" style={{ margin: 0 }}>Sem ID de afiliado salvo: os links vão como vieram. <Link to="/config">Configurar</Link></span>
           )}
         </div>
@@ -160,7 +164,7 @@ export default function Capture() {
                   <div className="offer-main">
                     <h3>{o.title}</h3>
                     <div className="offer-tags">
-                      <span className="badge badge-off">{o.marketplace === 'MERCADO_LIVRE' ? 'Mercado Livre' : o.marketplace === 'SHOPEE' ? 'Shopee' : 'Outro'}</span>
+                      <span className="badge badge-off">{o.marketplace === 'OUTRO' ? 'Outro' : mktName(o.marketplace)}</span>
                       {o.coupon && <span className="badge badge-ready">Cupom {o.coupon}</span>}
                       {!!o.discountPercent && <span className="badge badge-on">{o.discountPercent}% OFF</span>}
                     </div>

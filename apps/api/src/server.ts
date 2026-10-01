@@ -10,6 +10,8 @@ import { z } from 'zod';
 import { prisma } from './db';
 import { getSecret, describeSecret, saveSecrets, SETTING_KEYS } from './services/settings';
 import { searchOffers, hasShopeeSearch, describeSearch } from './services/shopee-sync';
+import { MARKETPLACE_LIST } from './services/marketplaces';
+import { amazonAffiliateUrl, amazonTag, expandAmazonUrl, extractAsin, fetchAmazonItem, isAmazonUrl, normalizeAmazonTag } from './integrations/amazon';
 import { decryptSecret } from './services/crypto';
 import { runAutomation } from './services/automation-runner';
 import { titleKey } from './services/title-key';
@@ -62,7 +64,7 @@ app.post('/api/auth/register', asyncRoute(async (req:any,res:any)=>{
   // administrador aprovar em Usuários.
   const first = (await prisma.user.count())===0;
   const user = await prisma.user.create({data:{name:body.name,email:body.email.toLowerCase(),passwordHash:await hashPassword(body.password),role:first?'MASTER':'OPERATOR',status:first?'ACTIVE':'PENDING',approvedAt:first?new Date():null}});
-  await prisma.affiliateAccount.createMany({data:[{userId:user.id,marketplace:'SHOPEE',displayName:'Shopee'},{userId:user.id,marketplace:'MERCADO_LIVRE',displayName:'Mercado Livre'}]});
+  await prisma.affiliateAccount.createMany({data:[{userId:user.id,marketplace:'SHOPEE',displayName:'Shopee'},{userId:user.id,marketplace:'MERCADO_LIVRE',displayName:'Mercado Livre'},{userId:user.id,marketplace:'AMAZON',displayName:'Amazon Associados'}]});
   if(first){ const token = await issueSession(user.id); return res.status(201).json({token,user:safeUser(user)}); }
   // Avisa os administradores por e-mail (se o SMTP estiver configurado).
   try{
@@ -254,12 +256,12 @@ app.post('/api/products/bulk-delete', requireAuth, asyncRoute(async(req:any,res:
   res.json({deleted:r.count});
 }));
 app.post('/api/products/import/manual', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({marketplace:z.enum(['SHOPEE','MERCADO_LIVRE']),title:z.string().min(2),productUrl:z.string().url(),affiliateUrl:z.string().url(),imageUrl:z.string().url().optional(),price:brNumber,oldPrice:brNumber,discountPercent:z.coerce.number().int().optional(),couponText:z.string().optional(),videoUrl:z.string().url().optional()}).parse(req.body);
+  const body=z.object({marketplace:z.enum(MARKETPLACE_LIST),title:z.string().min(2),productUrl:z.string().url(),affiliateUrl:z.string().url(),imageUrl:z.string().url().optional(),price:brNumber,oldPrice:brNumber,discountPercent:z.coerce.number().int().optional(),couponText:z.string().optional(),videoUrl:z.string().url().optional()}).parse(req.body);
   // Cadastro manual não passa por OAuth: o link de afiliado já vem pronto do painel do
   // marketplace. A conta local existe só para agrupar os produtos do usuário.
   const account=await prisma.affiliateAccount.upsert({
     where:{userId_marketplace:{userId:req.user.id,marketplace:body.marketplace}},
-    create:{userId:req.user.id,marketplace:body.marketplace,displayName:body.marketplace==='SHOPEE'?'Shopee (cadastro manual)':'Mercado Livre (cadastro manual)'},
+    create:{userId:req.user.id,marketplace:body.marketplace,displayName:{SHOPEE:'Shopee',MERCADO_LIVRE:'Mercado Livre',AMAZON:'Amazon'}[body.marketplace]+' (cadastro manual)'},
     update:{}
   });
   res.status(201).json(await prisma.product.create({data:{...body,accountId:account.id}}));
@@ -274,6 +276,25 @@ app.post('/api/products/import/mercadolivre', requireAuth, asyncRoute(async(req:
   let token:string|undefined; try{ token=await getMercadoLivreAccessToken(req.user.id); }catch{ token=undefined; }
   const item=await fetchMercadoLivreItem(id, token);
   const product=await prisma.product.upsert({where:{id:'never'},create:{...item,affiliateUrl:body.affiliateUrl,accountId:account.id,marketplace:'MERCADO_LIVRE'},update:{}}).catch(async()=>prisma.product.create({data:{...item,affiliateUrl:body.affiliateUrl,accountId:account.id,marketplace:'MERCADO_LIVRE'}}));
+  res.status(201).json(product);
+}));
+
+// Link da Amazon (inteiro ou amzn.to): troca o rastreio pela tag do usuário. Com a Creators API liberada,
+// nome, foto e preço vêm da Amazon; sem ela, valem os dados digitados na tela.
+app.post('/api/products/import/amazon', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({url:z.string().url(),title:z.string().trim().optional(),imageUrl:z.string().url().optional(),price:brNumber,oldPrice:brNumber,couponText:z.string().optional()}).parse(req.body);
+  if(!isAmazonUrl(body.url)) return res.status(400).json({error:'Esse link não é da Amazon.'});
+  const tag=await amazonTag(); if(!tag) return res.status(400).json({error:'Salve sua tag de associado da Amazon (ex.: seunome-20) em Configurações antes de importar.'});
+  const url=await expandAmazonUrl(body.url); const asin=extractAsin(url);
+  let item=null as Awaited<ReturnType<typeof fetchAmazonItem>>;
+  if(asin){ try{ item=await fetchAmazonItem(asin); }catch{ item=null; } }
+  const title=item?.title||body.title; if(!title) return res.status(400).json({error:'Informe o nome do produto (a busca automática da Amazon ainda não está liberada para sua conta).'});
+  const price=item?.price??body.price; const oldPrice=item?.oldPrice??body.oldPrice;
+  const account=await prisma.affiliateAccount.upsert({where:{userId_marketplace:{userId:req.user.id,marketplace:'AMAZON'}},create:{userId:req.user.id,marketplace:'AMAZON',displayName:'Amazon Associados'},update:{}});
+  const data={title,imageUrl:item?.imageUrl||body.imageUrl||null,productUrl:asin?`https://www.amazon.com.br/dp/${asin}`:url,affiliateUrl:amazonAffiliateUrl(url,tag),price:price??null,oldPrice:oldPrice??null,
+    discountPercent:item?.discountPercent??(price&&oldPrice&&oldPrice>price?Math.round((1-price/oldPrice)*100):null),couponText:body.couponText||null,active:true};
+  const existing=asin?await prisma.product.findFirst({where:{accountId:account.id,externalId:asin}}):null;
+  const product=existing?await prisma.product.update({where:{id:existing.id},data}):await prisma.product.create({data:{...data,accountId:account.id,marketplace:'AMAZON',externalId:asin}});
   res.status(201).json(product);
 }));
 
@@ -361,7 +382,7 @@ app.get('/api/categories/search', requireAuth, asyncRoute(async(req:any,res:any)
   try{ res.json(await searchCategories(q.q)); }catch(e:any){ res.status(400).json({error:e.message}); }
 }));
 app.post('/api/shopee/search', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({marketplace:z.enum(['SHOPEE','MERCADO_LIVRE']).optional(),marketplaces:z.array(z.enum(['SHOPEE','MERCADO_LIVRE'])).max(2).optional(),keyword:z.string().optional(),keywords:z.array(z.string()).max(50).optional(),categoryId:z.union([z.string(),z.number()]).optional(),sort:z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING']).optional(),sorts:z.array(z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING'])).max(5).optional(),limit:z.coerce.number().int().min(1).max(50).optional(),minDiscount:z.coerce.number().int().min(0).max(99).optional()}).parse(req.body);
+  const body=z.object({marketplace:z.enum(MARKETPLACE_LIST).optional(),marketplaces:z.array(z.enum(MARKETPLACE_LIST)).max(3).optional(),keyword:z.string().optional(),keywords:z.array(z.string()).max(50).optional(),categoryId:z.union([z.string(),z.number()]).optional(),sort:z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING']).optional(),sorts:z.array(z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING'])).max(5).optional(),limit:z.coerce.number().int().min(1).max(50).optional(),minDiscount:z.coerce.number().int().min(0).max(99).optional()}).parse(req.body);
   try{ res.json({offers:await searchOffers(req.user.id,{...body,categoryId:body.categoryId===''?undefined:body.categoryId})}); }
   catch(e:any){ res.status(400).json({error:e.message}); }
 }));
@@ -399,7 +420,7 @@ app.post('/api/offers/preview', requireAuth, asyncRoute(async(req:any,res:any)=>
 
 // ---------- Cupons (Shopee / Mercado Livre) ----------
 const couponBody=z.object({
-  marketplace:z.enum(['SHOPEE','MERCADO_LIVRE']),
+  marketplace:z.enum(MARKETPLACE_LIST),
   code:z.string().trim().min(3).max(40),
   description:z.string().trim().max(200).optional().nullable(),
   minPrice:brNumber,
@@ -441,7 +462,7 @@ app.post('/api/coupons/parse', requireAuth, asyncRoute(async(req:any,res:any)=>{
 }));
 // Salva vários de uma vez (resultado do "colar lista"). Código repetido no mesmo marketplace é ignorado.
 app.post('/api/coupons/bulk', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({marketplace:z.enum(['SHOPEE','MERCADO_LIVRE']),validUntil:z.string().optional().nullable(),inProducts:z.boolean().optional(),items:z.array(z.object({code:z.string().trim().min(3).max(40),description:z.string().trim().max(200).optional().nullable(),minPrice:brNumber})).min(1).max(100)}).parse(req.body);
+  const body=z.object({marketplace:z.enum(MARKETPLACE_LIST),validUntil:z.string().optional().nullable(),inProducts:z.boolean().optional(),items:z.array(z.object({code:z.string().trim().min(3).max(40),description:z.string().trim().max(200).optional().nullable(),minPrice:brNumber})).min(1).max(100)}).parse(req.body);
   const existing=new Set((await prisma.coupon.findMany({where:{userId:req.user.id,marketplace:body.marketplace},select:{code:true}})).map(c=>c.code));
   let count=0;
   for(const it of body.items){ const code=it.code.toUpperCase(); if(existing.has(code)) continue; existing.add(code);
@@ -465,7 +486,7 @@ app.delete('/api/coupons/:id', requireAuth, asyncRoute(async(req:any,res:any)=>{
 }));
 // Agenda do listão por marketplace (intervalo, janela, grupos, link do usuário, canal do Telegram).
 app.put('/api/coupons/schedule/:marketplace', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const m=z.enum(['SHOPEE','MERCADO_LIVRE']).parse(req.params.marketplace); const body=scheduleBody.parse(req.body);
+  const m=z.enum(MARKETPLACE_LIST).parse(req.params.marketplace); const body=scheduleBody.parse(req.body);
   const sch=await getSchedule(req.user.id,m);
   const data:any={...body}; if('link' in body) data.link=body.link||null; if('telegramChannel' in body) data.telegramChannel=body.telegramChannel?body.telegramChannel.replace(/^@/,''):null;
   await prisma.couponSchedule.update({where:{id:sch.id},data});
@@ -473,14 +494,14 @@ app.put('/api/coupons/schedule/:marketplace', requireAuth, asyncRoute(async(req:
 }));
 // Importa agora os cupons do canal do Telegram configurado (ou informado no corpo).
 app.post('/api/coupons/import-telegram/:marketplace', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const m=z.enum(['SHOPEE','MERCADO_LIVRE']).parse(req.params.marketplace);
+  const m=z.enum(MARKETPLACE_LIST).parse(req.params.marketplace);
   const sch=await getSchedule(req.user.id,m); const channel=String(req.body?.channel||sch.telegramChannel||'').trim();
   if(!channel) return res.status(400).json({error:'Informe o canal público do Telegram (ex.: melicupons).'});
   try{ const r=await importTelegramCoupons(req.user.id,m,channel); res.json({...r,...(await couponsPayload(req.user.id))}); }catch(e:any){ res.status(400).json({error:e.message}); }
 }));
 // Envia o listão agora.
 app.post('/api/coupons/send/:marketplace', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const m=z.enum(['SHOPEE','MERCADO_LIVRE']).parse(req.params.marketplace);
+  const m=z.enum(MARKETPLACE_LIST).parse(req.params.marketplace);
   const sch=await getSchedule(req.user.id,m);
   try{ const n=await sendCouponList(sch,'manual'); res.json({count:n}); }catch(e:any){ res.status(400).json({error:e.message}); }
 }));
@@ -537,7 +558,7 @@ app.post('/api/offers/send-now', requireAuth, asyncRoute(async(req:any,res:any)=
 }));
 
 // ---------- Clientes (atendimento no privado do WhatsApp) ----------
-const botView=(b:any)=>({...b,marketplaces:Array.isArray(b.marketplaces)&&b.marketplaces.length?b.marketplaces:['SHOPEE','MERCADO_LIVRE']});
+const botView=(b:any)=>({...b,marketplaces:Array.isArray(b.marketplaces)&&b.marketplaces.length?b.marketplaces:['SHOPEE','MERCADO_LIVRE']}); // Amazon só entra quando o usuário marca (a busca dela exige a Creators API)
 async function customersPayload(userId:string){
   const bot=await getBot(userId);
   const customers=await prisma.customer.findMany({where:{userId},orderBy:{lastSeenAt:'desc'},take:500,include:{requests:{orderBy:{createdAt:'desc'},take:1,select:{keyword:true,status:true,createdAt:true,text:true}}}});
@@ -547,7 +568,7 @@ async function customersPayload(userId:string){
 }
 app.get('/api/customers', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await customersPayload(req.user.id))));
 app.put('/api/customers/bot', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({enabled:z.boolean().optional(),everyMinutes:z.coerce.number().int().min(1).max(1440).optional(),maxOffers:z.coerce.number().int().min(1).max(10).optional(),marketplaces:z.array(z.enum(['SHOPEE','MERCADO_LIVRE'])).min(1).max(2).optional(),askMarketplace:z.boolean().optional(),sendCoupons:z.boolean().optional(),welcomeText:z.string().max(2000).optional().nullable(),linkText:z.string().max(120).optional().nullable()}).parse(req.body);
+  const body=z.object({enabled:z.boolean().optional(),everyMinutes:z.coerce.number().int().min(1).max(1440).optional(),maxOffers:z.coerce.number().int().min(1).max(10).optional(),marketplaces:z.array(z.enum(MARKETPLACE_LIST)).min(1).max(3).optional(),askMarketplace:z.boolean().optional(),sendCoupons:z.boolean().optional(),welcomeText:z.string().max(2000).optional().nullable(),linkText:z.string().max(120).optional().nullable()}).parse(req.body);
   await getBot(req.user.id);
   // A sessão do WhatsApp é uma só: ligar aqui desliga o atendimento de outro usuário que estivesse ligado.
   if(body.enabled) await prisma.customerBot.updateMany({where:{userId:{not:req.user.id},enabled:true},data:{enabled:false}});
@@ -616,6 +637,7 @@ app.put('/api/integrations/settings', requireAuth, asyncRoute(async(req:any,res:
     if(v.includes('@') && !['SMTP_USER','SMTP_FROM'].includes(k)) return res.status(400).json({error:`${k}: valor parece um e-mail. Informe a credencial da plataforma.`});
     if(k==='SHOPEE_APP_ID'&&!/^\d{6,}$/.test(v)) return res.status(400).json({error:'SHOPEE_APP_ID deve conter somente números (ex.: 18305511237).'});
     if(k==='SHOPEE_SECRET'&&v.length<16) return res.status(400).json({error:'SHOPEE_SECRET inválido: a chave da Open API é longa (32+ caracteres).'});
+    if(k==='AMAZON_PARTNER_TAG'&&!/^[A-Za-z0-9._-]+-\d{2}$/.test(normalizeAmazonTag(v))) return res.status(400).json({error:'Tag da Amazon inválida: use a tag do Associates Central, que termina em -20 (ex.: seunome-20).'});
     if(k==='ML_CLIENT_ID'&&!/^\d+$/.test(v)) return res.status(400).json({error:'ML_CLIENT_ID deve conter somente números.'});
   }
   await saveSecrets(body as any, req.user.id);
@@ -630,6 +652,8 @@ app.get('/api/integrations/status', requireAuth, asyncRoute(async(req:any,res:an
     mercadolivre:{configured:await has('ML_CLIENT_ID','ML_CLIENT_SECRET'),connected:linked('MERCADO_LIVRE'),vars:['ML_CLIENT_ID','ML_CLIENT_SECRET','ML_REDIRECT_URI']},
     // Shopee Affiliate não tem OAuth: com App ID + Secret salvos, a integração já está pronta.
     shopee:{configured:await has('SHOPEE_APP_ID','SHOPEE_SECRET'),connected:linked('SHOPEE')||await has('SHOPEE_APP_ID','SHOPEE_SECRET'),vars:['SHOPEE_APP_ID','SHOPEE_SECRET']},
+    // Amazon: só a tag já gera links de afiliado; as credenciais da Creators API liberam a busca de produtos.
+    amazon:{configured:await has('AMAZON_PARTNER_TAG'),connected:await has('AMAZON_PARTNER_TAG'),api:await has('AMAZON_CREDENTIAL_ID','AMAZON_CREDENTIAL_SECRET'),vars:['AMAZON_PARTNER_TAG','AMAZON_CREDENTIAL_ID','AMAZON_CREDENTIAL_SECRET']},
     whatsapp:{configured:await has('META_ACCESS_TOKEN','META_PHONE_NUMBER_ID'),connected:await has('META_ACCESS_TOKEN','META_PHONE_NUMBER_ID'),vars:['META_ACCESS_TOKEN','META_PHONE_NUMBER_ID','META_WABA_ID']},
     instagram:{configured:await has('META_ACCESS_TOKEN','META_IG_USER_ID'),connected:await has('META_ACCESS_TOKEN','META_IG_USER_ID'),vars:['META_ACCESS_TOKEN','META_IG_USER_ID']},
     email:{configured:await has('SMTP_HOST','SMTP_USER','SMTP_PASS'),connected:await has('SMTP_HOST','SMTP_USER','SMTP_PASS'),vars:['SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASS','SMTP_FROM']}

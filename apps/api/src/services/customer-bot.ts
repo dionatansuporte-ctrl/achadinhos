@@ -2,7 +2,8 @@ import type { Customer, CustomerBot, Marketplace } from '@prisma/client';
 import { prisma } from '../db';
 import { onWhatsAppMessage, sendWhatsAppWebText, showTyping, getWaState, type WaIncoming } from '../integrations/whatsapp-web';
 import type { ShopeeOffer } from '../integrations/shopee';
-import { searchOffers, type SearchMarketplace } from './shopee-sync';
+import { searchOffers } from './shopee-sync';
+import { isMarketplace, marketplaceIcon, marketplaceLabel, storeIn, storeOf, type SearchMarketplace } from './marketplaces';
 import { renderOffer, defaultOfferTemplate } from './offer';
 import { titleKey } from './title-key';
 import { filterByRequest, type MatchLevel } from './offer-match';
@@ -42,7 +43,8 @@ import { importTelegramCoupons } from './coupon-import';
  * Tudo que chega vira uma linha em CustomerRequest, que a tela Clientes mostra.
  */
 
-const DEFAULT_WELCOME = [
+/** Boas-vindas padrão; cita só as lojas que o robô usa. */
+const defaultWelcome = (stores: SearchMarketplace[]) => [
   'Olá! 👋 Sou o robô de ofertas.',
   '',
   'Me diga o que você procura e eu te mando as melhores ofertas. Exemplos:',
@@ -51,9 +53,9 @@ const DEFAULT_WELCOME = [
   '• _tênis masculino_',
   '',
   'Quanto mais detalhes (marca, tamanho, modelo), mais certeira a oferta. 😉',
-  'Prefere Shopee ou Mercado Livre? Pode dizer junto (_fone bluetooth na shopee_).',
+  ...(stores.length > 1 ? [`Prefere ${storeList(stores)}? Pode dizer junto (_fone bluetooth ${storeIn(stores[0])}_).`] : []),
   '',
-  'Quer cupons? Escreva *cupom* (ou *cupom shopee*, *cupom mercado livre*).',
+  `Quer cupons? Escreva *cupom*${stores.length > 1 ? ` (ou ${stores.map(s => `*cupom ${marketplaceLabel(s).toLowerCase()}*`).join(', ')})` : ''}.`,
   'Para não receber mais nada, escreva *chega de oferta*.'
 ].join('\n');
 
@@ -75,22 +77,32 @@ const FILLER_RE = /\b(quero|queria|gostaria|preciso|procuro|procurando|estou|to|
 // (em 2026-09-26 um cliente respondeu "mercado libre" e o robô achou que era produto novo e perguntou a loja de novo).
 const SHOPEE_RE = /\b(shopp?e+|shopi|shopy|shop|xopee?|xopi|chopee)\b/i;
 const ML_RE = /\bmercado\s*li[bv]r[ei]s?\b|\bmercadoli[bv]r[ei]\b|\bmeli\b|\bml\b|\bmercad[oa]\b/i;
-const BOTH_RE = /\b(os dois|as duas|nos dois|nas duas|ambos|ambas|todos|todas|tanto faz|qualquer|nenhuma?|indiferente|os 2|2)\b/i;
+const AMAZON_RE = /\b(amazo[nm]|amaz[oô]n|amason|amazom|amzn)\b/i;
+const BOTH_RE = /\b(os dois|as duas|nos dois|nas duas|ambos|ambas|todos|todas|tanto faz|qualquer|nenhuma?|indiferente|os 2|as 3|os 3|as tr[eê]s|nas tr[eê]s|2)\b/i;
+const STORE_RES: [SearchMarketplace, RegExp][] = [['SHOPEE', SHOPEE_RE], ['MERCADO_LIVRE', ML_RE], ['AMAZON', AMAZON_RE]];
 export type MarketplaceChoice = Marketplace | 'ALL';
 export function marketplaceIn(text: string): MarketplaceChoice | null {
-  const s = SHOPEE_RE.test(text), m = ML_RE.test(text);
-  if (s && m) return 'ALL';
-  if (s) return 'SHOPEE';
-  if (m) return 'MERCADO_LIVRE';
+  const named = STORE_RES.filter(([, re]) => re.test(text)).map(([m]) => m);
+  if (named.length > 1) return 'ALL';
+  if (named.length) return named[0];
   return BOTH_RE.test(text) ? 'ALL' : null;
 }
-const stripMarketplace = (text: string) => text.replace(SHOPEE_RE, ' ').replace(ML_RE, ' ').replace(BOTH_RE, ' ');
-// Resposta numérica às perguntas de loja ("1", "opção 2", "3."): 1 = Shopee, 2 = Mercado Livre, 3 = qualquer uma.
-const NUMBER_CHOICE_RE = /^[^\p{L}\d]*(?:(?:a|o|op[cç][aã]o|n[uú]mero|escolho|quero)\s+)?([123])(?!\d)[^\p{L}\d]*$/iu;
-export function numberChoice(text: string): MarketplaceChoice | null {
+const stripMarketplace = (text: string) => STORE_RES.reduce((t, [, re]) => t.replace(re, ' '), text).replace(BOTH_RE, ' ');
+// Resposta numérica às perguntas de loja ("1", "opção 2", "3."): as lojas do robô na ordem da
+// pergunta (1 Shopee, 2 Mercado Livre, 3 Amazon...) e o número seguinte = qualquer uma.
+const NUMBER_CHOICE_RE = /^[^\p{L}\d]*(?:(?:a|o|op[cç][aã]o|n[uú]mero|escolho|quero)\s+)?([1-9])(?!\d)[^\p{L}\d]*$/iu;
+export function numberChoice(text: string, stores: SearchMarketplace[] = ['SHOPEE', 'MERCADO_LIVRE']): MarketplaceChoice | null {
   const m = NUMBER_CHOICE_RE.exec(text);
-  return !m ? null : m[1] === '1' ? 'SHOPEE' : m[1] === '2' ? 'MERCADO_LIVRE' : 'ALL';
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n <= stores.length ? stores[n - 1] : n === stores.length + 1 ? 'ALL' : null;
 }
+/** Opções numeradas das perguntas de loja: "*1* 🛍️ Shopee", ..., "*N* 🔀 Qualquer uma". */
+function storeOptions(stores: SearchMarketplace[], anyLabel: string) {
+  return [...stores.map((s, i) => `*${i + 1}* ${marketplaceIcon(s)} ${marketplaceLabel(s)}`), `*${stores.length + 1}* 🔀 ${anyLabel}`].join('\n');
+}
+/** "Shopee ou Mercado Livre" / "Shopee, Mercado Livre ou Amazon". */
+const storeList = (stores: SearchMarketplace[]) => { const n = stores.map(marketplaceLabel); return n.length > 1 ? `${n.slice(0, -1).join(', ')} ou ${n[n.length - 1]}` : n.join(''); };
 
 const fold = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -218,8 +230,9 @@ export async function getBot(userId: string) {
 }
 
 export function botMarketplaces(bot: CustomerBot): SearchMarketplace[] {
-  const list = (Array.isArray(bot.marketplaces) ? bot.marketplaces : []).filter((m): m is SearchMarketplace => m === 'SHOPEE' || m === 'MERCADO_LIVRE');
-  return list.length ? list : ['SHOPEE', 'MERCADO_LIVRE'];
+  // Sempre na ordem fixa (Shopee, Mercado Livre, Amazon): é a numeração das perguntas de loja.
+  const list = (Array.isArray(bot.marketplaces) ? bot.marketplaces : []).filter(isMarketplace);
+  return list.length ? MARKETPLACES.filter((m): m is SearchMarketplace => list.includes(m as SearchMarketplace)) : ['SHOPEE', 'MERCADO_LIVRE'];
 }
 
 /** Link que o usuário divulga: abre o WhatsApp do número pareado com o texto já digitado. */
@@ -296,7 +309,8 @@ function chosenMarketplaces(bot: CustomerBot, choice?: MarketplaceChoice | null)
 
 /** Quanto tempo a pergunta "cupom de qual loja?" espera a resposta do cliente. */
 const ASK_TTL_MS = 15 * 60_000;
-const ASK_TEXT = '🎟️ Claro! Cupom de qual loja você quer?\n\n👉 *Escolher:*\n*1* 🛍️ Shopee\n*2* 🟡 Mercado Livre\n*3* 🔀 Os dois\n\nResponda com o número ou o nome da loja. 😊';
+const askText = (stores: SearchMarketplace[]) =>
+  `🎟️ Claro! Cupom de qual loja você quer?\n\n👉 *Escolher:*\n${storeOptions(stores, stores.length === 2 ? 'Os dois' : 'Todas')}\n\nResponda com o número ou o nome da loja. 😊`;
 
 /**
  * Responde "cupom": manda os listões da(s) loja(s) escolhida(s), ou avisa que não tem.
@@ -308,7 +322,7 @@ async function sendCouponsTo(bot: CustomerBot, customer: Customer, text: string,
   const recent = await prisma.customerRequest.findFirst({ where: { customerId: customer.id, status: 'COUPONS', keyword: key, createdAt: { gt: new Date(Date.now() - COUPON_REPEAT_MS) } }, select: { id: true } });
   if (recent) { await log(customer.id, { text, keyword: key, status: 'LIMITED' }); return; }
   const texts = bot.sendCoupons ? await couponMessages(customer.userId, marketplaces) : [];
-  const loja = marketplaces.length === 1 ? ` ${marketplaces[0] === 'SHOPEE' ? 'da Shopee' : 'do Mercado Livre'}` : '';
+  const loja = marketplaces.length === 1 ? ` ${storeOf(marketplaces[0])}` : '';
   const replyText = texts.length ? texts.join('\n\n') : `Poxa${vocative(customer)}, no momento não tenho cupom válido${loja}. 😕 Mas me diga um produto e eu busco a melhor oferta pra você! 😊`;
   for (const t of texts.length ? texts : [replyText]) await reply(customer.jid, t);
   await prisma.customer.update({ where: { id: customer.id }, data: { requestCount: { increment: 1 } } });
@@ -318,8 +332,9 @@ async function sendCouponsTo(bot: CustomerBot, customer: Customer, text: string,
 /** Cliente pediu cupom sem dizer a loja: pergunta (só se o robô usa mais de uma loja). */
 async function askMarketplace(bot: CustomerBot, customer: Customer, text: string) {
   if (botMarketplaces(bot).length < 2) return sendCouponsTo(bot, customer, text);
-  await reply(customer.jid, ASK_TEXT);
-  await log(customer.id, { text, status: 'ASK', replyText: ASK_TEXT });
+  const ask = askText(botMarketplaces(bot));
+  await reply(customer.jid, ask);
+  await log(customer.id, { text, status: 'ASK', replyText: ask });
 }
 
 /** Há uma pergunta "cupom de qual loja?" recente sem resposta? */
@@ -401,10 +416,10 @@ async function pendingStore(customerId: string) {
  * "mercado livre"/"ml" -> só ML, "qualquer uma"/"tanto faz"/"as duas" -> todas. Outro produto,
  * cupom ou saudação -> null (segue o caminho normal).
  */
-export function storeAnswer(pending: { keyword: string; wantsCoupons: boolean }, text: string, intent: Intent): SearchRequest | null {
+export function storeAnswer(pending: { keyword: string; wantsCoupons: boolean }, text: string, intent: Intent, stores?: SearchMarketplace[]): SearchRequest | null {
   const base: SearchRequest = { keyword: pending.keyword, wantsCoupons: pending.wantsCoupons || COUPON_RE.test(text), marketplaceAsked: true };
-  // "1", "2" ou "3" (opções da pergunta) vêm antes de tudo: "2" sozinho também casa com BOTH_RE ("os 2").
-  const num = numberChoice(text);
+  // "1", "2", "3"... (opções da pergunta) vêm antes de tudo: "2" sozinho também casa com BOTH_RE ("os 2").
+  const num = numberChoice(text, stores);
   if (num) return { ...base, ...(num !== 'ALL' ? { marketplace: num } : {}) };
   // "tanto faz", "não sei", "nenhuma preferência", "os dois": todas as lojas (mesma regra da pergunta de detalhes).
   if (SKIP_DETAIL_RE.test(text) || marketplaceIn(text) === 'ALL') return base;
@@ -417,11 +432,11 @@ export function storeAnswer(pending: { keyword: string; wantsCoupons: boolean },
   return null;
 }
 /** Texto da pergunta "em qual loja?". */
-export function storeQuestion(keyword: string, customer: { name?: string | null; givenName?: string | null }) {
-  return `🛒 Em qual loja você quer que eu busque *${keyword}*${vocative(customer)}?\n\n👉 *Escolher:*\n*1* 🛍️ Shopee\n*2* 🟡 Mercado Livre\n*3* 🔀 Qualquer uma\n\nResponda com o número ou o nome da loja. 😊`;
+export function storeQuestion(keyword: string, customer: { name?: string | null; givenName?: string | null }, stores: SearchMarketplace[] = ['SHOPEE', 'MERCADO_LIVRE']) {
+  return `🛒 Em qual loja você quer que eu busque *${keyword}*${vocative(customer)}?\n\n👉 *Escolher:*\n${storeOptions(stores, 'Qualquer uma')}\n\nResponda com o número ou o nome da loja. 😊`;
 }
 
-const storeName = (m: SearchMarketplace) => m === 'SHOPEE' ? 'na Shopee' : 'no Mercado Livre';
+const storeName = storeIn;
 
 /**
  * Busca e envia as ofertas de `keyword` para o cliente. Usado pela resposta automática e pelo
@@ -436,11 +451,12 @@ export async function sendOffersTo(bot: CustomerBot, customer: Customer, keyword
   try {
     // As buscas dos marketplaces são frouxas ("tv 50 polegadas" traz suporte de TV e TV 32), então
     // pede bem mais candidatos por loja e filtra pelo título (offer-match). Shopee: relevância +
-    // mais vendidos (quem aparece bem nos dois sobe); ML só tem mais vendidos da categoria.
+    // mais vendidos (quem aparece bem nos dois sobe); ML só tem mais vendidos da categoria; Amazon, relevância.
     const per = Math.min(25, Math.max(12, limit * 6));
     const errors: any[] = [];
+    const sortsFor = (m: SearchMarketplace) => m === 'SHOPEE' ? ['RELEVANCE', 'SALES'] : m === 'AMAZON' ? ['RELEVANCE'] : ['SALES'];
     const lists = await Promise.all(marketplaces.map(m =>
-      searchOffers(customer.userId, { marketplaces: [m], keywords: [keyword], sorts: m === 'SHOPEE' ? ['RELEVANCE', 'SALES'] : ['SALES'], limit: per })
+      searchOffers(customer.userId, { marketplaces: [m], keywords: [keyword], sorts: sortsFor(m), limit: per })
         .then(l => filterByRequest(l, keyword)).catch(e => { errors.push(e); return { offers: [] as ShopeeOffer[], level: 'none' as const }; })));
     if (errors.length === marketplaces.length) throw errors[0];
     // Tudo batendo em alguma loja vale mais que "parecido" na outra.
@@ -565,7 +581,7 @@ async function handleIncoming(m: WaIncoming) {
         return handleIncoming({ ...m, text: pending.request });
       }
       // Só agora vai o texto de boas-vindas (o da tela Clientes ou o padrão), que explica como pedir o produto.
-      const text = `Prazer, ${first}! 😊\n\n${bot.welcomeText?.trim() || DEFAULT_WELCOME}`;
+      const text = `Prazer, ${first}! 😊\n\n${bot.welcomeText?.trim() || defaultWelcome(botMarketplaces(bot))}`;
       await reply(m.jid, text);
       await log(customer.id, { text: m.text, status: 'NAME', replyText: text });
       return;
@@ -575,7 +591,7 @@ async function handleIncoming(m: WaIncoming) {
 
   if (intent.kind === 'OPT_IN') {
     await prisma.customer.update({ where: { id: customer.id }, data: { optedOut: false } });
-    const text = bot.welcomeText?.trim() || DEFAULT_WELCOME;
+    const text = bot.welcomeText?.trim() || defaultWelcome(botMarketplaces(bot));
     await reply(m.jid, text);
     await log(customer.id, { text: m.text, status: 'OPT_IN', replyText: text });
     return;
@@ -594,19 +610,19 @@ async function handleIncoming(m: WaIncoming) {
   // Resposta à pergunta "em qual loja busco X?" feita há pouco (só uma das duas perguntas pode ser a última).
   if (!search && !base) {
     const pending = await pendingStore(customer.id);
-    if (pending) search = storeAnswer(pending, m.text, intent);
+    if (pending) search = storeAnswer(pending, m.text, intent, botMarketplaces(bot));
   }
 
-  // "1", "2" ou "3" respondendo à pergunta "cupom de qual loja?" (a da oferta já foi tratada em storeAnswer).
+  // "1", "2", "3"... respondendo à pergunta "cupom de qual loja?" (a da oferta já foi tratada em storeAnswer).
   if (!search) {
-    const num = numberChoice(m.text);
+    const num = numberChoice(m.text, botMarketplaces(bot));
     if (num && await pendingAsk(customer.id)) { await sendCouponsTo(bot, customer, m.text, num); return; }
   }
 
   if (!search && intent.kind === 'HELP') {
     // Saudação repetida dentro de 10 min ganha só uma linha, não o menu inteiro de novo.
     const repeated = !!customer.lastNoticeAt && Date.now() - customer.lastNoticeAt.getTime() < 10 * 60_000;
-    const text = repeated ? `Estou aqui pra te ajudar${vocative(customer)}! 😊 Me diga o produto que você procura (ex.: _fone bluetooth_, _tv 50 polegadas_) ou escreva *cupom*.` : (bot.welcomeText?.trim() || DEFAULT_WELCOME);
+    const text = repeated ? `Estou aqui pra te ajudar${vocative(customer)}! 😊 Me diga o produto que você procura (ex.: _fone bluetooth_, _tv 50 polegadas_) ou escreva *cupom*.` : (bot.welcomeText?.trim() || defaultWelcome(botMarketplaces(bot)));
     await reply(m.jid, text);
     if (!repeated) await prisma.customer.update({ where: { id: customer.id }, data: { lastNoticeAt: new Date() } });
     await log(customer.id, { text: m.text, status: 'HELP', replyText: text });
@@ -643,7 +659,7 @@ async function handleIncoming(m: WaIncoming) {
   // opção está ligada e o robô usa as duas. Não gasta o limite por tempo e vem ANTES dele: a loja
   // fica escolhida e, quando o limite passar, a busca sai sozinha já na loja certa.
   if (bot.askMarketplace !== false && !search.marketplace && !search.marketplaceAsked && botMarketplaces(bot).length > 1) {
-    const text = storeQuestion(search.keyword, customer);
+    const text = storeQuestion(search.keyword, customer, botMarketplaces(bot));
     await reply(m.jid, text);
     await log(customer.id, { text: m.text, keyword: search.keyword, status: 'ASK_STORE', replyText: text });
     return;

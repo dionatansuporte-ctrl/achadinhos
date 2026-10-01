@@ -3,11 +3,12 @@ import { prisma } from '../db';
 import { inWindow, minutesOfDay } from './scheduler';
 import { importTelegramCoupons } from './coupon-import';
 import { hasShopeeSearch, ruleMarketplaces } from './shopee-sync';
+import { MARKETPLACE_LIST, marketplaceLabel } from './marketplaces';
 
 /**
- * Cupons da Shopee e do Mercado Livre.
+ * Cupons da Shopee, do Mercado Livre e da Amazon.
  *
- * Nenhuma das duas plataformas expõe cupom pela API de afiliado, então o usuário cadastra
+ * Nenhuma das plataformas expõe cupom pela API de afiliado, então o usuário cadastra
  * os cupons que pegou (portal do afiliado, grupos do Telegram...), com validade e compra
  * mínima. O sistema garante que só cupom válido sai para os grupos:
  *   - "listão": uma mensagem por marketplace com todos os cupons válidos, a cada
@@ -20,8 +21,8 @@ import { hasShopeeSearch, ruleMarketplaces } from './shopee-sync';
 const TZ = 'America/Sao_Paulo';
 const brl = (n: number) => `R$ ${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-export const MARKETPLACES: Marketplace[] = ['SHOPEE', 'MERCADO_LIVRE'];
-export const marketplaceName = (m: Marketplace) => (m === 'SHOPEE' ? 'Shopee' : 'Mercado Livre');
+export const MARKETPLACES: Marketplace[] = [...MARKETPLACE_LIST];
+export const marketplaceName = (m: Marketplace) => marketplaceLabel(m);
 
 /** Fim do dia informado ("2026-09-30") no fuso de São Paulo. Aceita também ISO completo. */
 export function parseValidUntil(v?: string | null): Date | null {

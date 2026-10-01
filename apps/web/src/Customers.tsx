@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Copy, MessageCircle, Power, QrCode, RefreshCw, Send, Trash2, Ban, History, Bot, Clock3, Store } from 'lucide-react';
 import { api } from './api';
 import { notify } from './notify';
+import { MKTS, mktName, mktIcon, type Mkt } from './marketplaces';
 
 /**
  * Clientes: atendimento no privado do WhatsApp.
@@ -13,7 +14,6 @@ import { notify } from './notify';
 type Bot = { enabled: boolean; everyMinutes: number; maxOffers: number; marketplaces: Mkt[]; askMarketplace: boolean; sendCoupons: boolean; welcomeText?: string | null; linkText?: string | null };
 type Customer = { id: string; jid: string; phone?: string | null; name?: string | null; givenName?: string | null; notes?: string | null; blocked: boolean; optedOut: boolean; requestCount: number; lastRequestAt?: string | null; firstSeenAt: string; lastSeenAt: string; lastRequest?: { keyword?: string | null; status: string; createdAt: string; text: string } | null };
 type Payload = { bot: Bot; link: string | null; waConnected: boolean; waNumber: string | null; customers: Customer[] };
-type Mkt = 'SHOPEE' | 'MERCADO_LIVRE';
 
 const INTERVALS = [[5, '5 min'], [10, '10 min'], [15, '15 min'], [30, '30 min'], [60, '1 h'], [120, '2 h'], [240, '4 h'], [720, '12 h'], [1440, '24 h']] as const;
 const STATUS: Record<string, [string, string]> = {
@@ -64,7 +64,10 @@ export default function Customers() {
     try { await api.delete(`/api/customers/${c.id}`); load(); } catch { notify('Não foi possível apagar.', 'error'); }
   }
 
-  const mktLabel = (m: string) => m === 'SHOPEE' ? 'Shopee' : m === 'MERCADO_LIVRE' ? 'Mercado Livre' : 'as duas lojas';
+  const mktLabel = (m: string) => m === 'ALL' ? 'todas as lojas' : mktName(m);
+  // Mesma ordem da API: é a numeração que o robô mostra ao cliente (1 Shopee, 2 Mercado Livre, 3 Amazon...).
+  const stores = bot ? MKTS.filter(m => bot.marketplaces.includes(m)) : [];
+  const anyNumber = stores.length + 1;
   const asksStore = bot && bot.askMarketplace && bot.marketplaces.length > 1;
   const intentText = (i: any) => !i ? '' : i.kind === 'SEARCH' ? (i.details ? `Pedido genérico: o robô pergunta ${i.details.items.map((x: string) => x.replace(/\s*\(.*$/, '')).join(', ')} de "${i.keyword}"${asksStore ? ', depois a loja,' : ''} e busca com a resposta` : `Busca por "${i.keyword}"${i.marketplace ? ` só na ${mktLabel(i.marketplace)}` : asksStore ? ' (robô pergunta a loja antes)' : ''}${i.wantsCoupons ? ' + cupons' : ''}`) : i.kind === 'COUPONS' ? (i.marketplace ? `Cupons: ${mktLabel(i.marketplace)}` : 'Cupons (robô pergunta a loja)') : i.kind === 'MARKETPLACE' ? `Resposta "qual loja": ${mktLabel(i.marketplace)}` : i.kind === 'OPT_OUT' ? 'Cliente pede para parar (não recebe mais nada)' : i.kind === 'OPT_IN' ? 'Cliente volta a receber' : 'Boas-vindas / ajuda';
   const list = (data?.customers || []).filter(c => { const f = filter.trim().toLowerCase(); return !f || (c.name || '').toLowerCase().includes(f) || (c.givenName || '').toLowerCase().includes(f) || (c.phone || '').includes(f.replace(/\D/g, '')) || (c.lastRequest?.keyword || '').toLowerCase().includes(f); });
@@ -85,15 +88,16 @@ export default function Customers() {
         <div className="env-field"><label>Ofertas por pedido <em>mais vendidos</em></label>
           <select value={bot.maxOffers} onChange={e => saveBot({ maxOffers: Number(e.target.value) })}>{[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n} {n === 1 ? 'oferta' : 'ofertas'}</option>)}</select></div>
         <div className="env-field"><label>Onde buscar</label>
-          <div className="chip-list" style={{ margin: 0 }}>{(['SHOPEE', 'MERCADO_LIVRE'] as Mkt[]).map(m => { const on = bot.marketplaces.includes(m); return <button key={m} type="button" className={`chip-toggle ${on ? 'on' : ''}`} onClick={() => { const next = on ? bot.marketplaces.filter(x => x !== m) : [...bot.marketplaces, m]; if (!next.length) return notify('Marque ao menos um marketplace.', 'info'); saveBot({ marketplaces: next }); }}>{m === 'SHOPEE' ? '🛍️ Shopee' : '🟡 Mercado Livre'}</button>; })}</div></div>
+          <div className="chip-list" style={{ margin: 0 }}>{MKTS.map(m => { const on = bot.marketplaces.includes(m); return <button key={m} type="button" className={`chip-toggle ${on ? 'on' : ''}`} onClick={() => { const next = on ? bot.marketplaces.filter(x => x !== m) : MKTS.filter(x => x === m || bot.marketplaces.includes(x)); if (!next.length) return notify('Marque ao menos um marketplace.', 'info'); saveBot({ marketplaces: next }); }}>{mktIcon(m)} {mktName(m)}</button>; })}</div>
+          {bot.marketplaces.includes('AMAZON') && <small>Amazon: a busca usa a Creators API (Configurações → Amazon), liberada pela Amazon só depois de vendas recentes pelo seu link. Sem ela, os pedidos na Amazon voltam "não consegui buscar".</small>}</div>
         <div className="env-field"><label><Store size={15} /> Perguntar a loja ao cliente</label>
           <label className="check-line" style={{ marginTop: 2 }}><input type="checkbox" checked={bot.askMarketplace} disabled={bot.marketplaces.length < 2} onChange={e => saveBot({ askMarketplace: e.target.checked })} /> Antes de buscar, o robô pergunta em qual loja</label>
-          <div className="chip-list" style={{ margin: '8px 0 0' }}><span className="chip">1 · 🛍️ Shopee</span><span className="chip">2 · 🟡 Mercado Livre</span><span className="chip">3 · 🔀 Qualquer uma</span></div>
-          <small>{bot.marketplaces.length < 2 ? 'Só funciona com as duas lojas marcadas em "Onde buscar".' : 'O cliente responde com o número (1, 2 ou 3) ou o nome da loja. Se ele já disser a loja no pedido ("fone na shopee"), o robô não pergunta. Desligado: busca nas duas e intercala.'}</small></div>
+          <div className="chip-list" style={{ margin: '8px 0 0' }}>{stores.map((m, i) => <span className="chip" key={m}>{i + 1} · {mktIcon(m)} {mktName(m)}</span>)}<span className="chip">{anyNumber} · 🔀 Qualquer uma</span></div>
+          <small>{bot.marketplaces.length < 2 ? 'Só funciona com duas ou mais lojas marcadas em "Onde buscar".' : `O cliente responde com o número (${stores.map((_, i) => i + 1).join(', ')} ou ${anyNumber}) ou o nome da loja. Se ele já disser a loja no pedido ("fone na shopee"), o robô não pergunta. Desligado: busca em todas as lojas marcadas e intercala.`}</small></div>
         <label className="check-line"><input type="checkbox" checked={bot.sendCoupons} onChange={e => saveBot({ sendCoupons: e.target.checked })} /> Se o cliente pedir cupom, manda o listão de cupons válidos junto</label>
         <div className="env-field" style={{ marginTop: 16 }}><label>Mensagem de boas-vindas <em>opcional</em></label>
           <textarea rows={5} value={bot.welcomeText || ''} placeholder={'Vazio = mensagem padrão (explica como pedir, como pedir cupom e como sair).'} title="No primeiro contato o robô só se apresenta e pergunta o nome do cliente; este texto vai logo depois que ele responde o nome." onChange={e => setBot({ ...bot, welcomeText: e.target.value })} onBlur={() => { if ((bot.welcomeText || '') !== (data.bot.welcomeText || '')) saveBot({ welcomeText: bot.welcomeText || null }); }} /></div>
-        <p className="hint">Comandos que o cliente pode usar: <b>chega de oferta</b> (para de receber), <b>quero oferta</b> (volta a receber), <b>cupom</b> (o robô pergunta "1 Shopee, 2 Mercado Livre ou 3 os dois?" e manda os cupons ativos da loja com seu link da tela Cupons, na hora, sem esperar o limite; <b>cupom shopee</b> pula a pergunta). Pedido = qualquer texto, ex.: "fone bluetooth". Pedido de uma palavra só ("tv", "celular", "furadeira"...) faz o robô perguntar tamanho, marca e modelo antes de buscar (os produtos mais comuns têm perguntas próprias); a resposta do cliente vira a busca ("tv 50 samsung 4k"). Com a opção acima ligada, o robô também pergunta em qual loja buscar ("Shopee, Mercado Livre ou qualquer uma?") quando o cliente não disse; a resposta vale 30 min e não gasta o limite por tempo. Toda mensagem recebe resposta, até áudio e foto ("escreva o produto"). Na primeira conversa o robô pergunta o nome do cliente e passa a chamá-lo pelo nome.</p>
+        <p className="hint">Comandos que o cliente pode usar: <b>chega de oferta</b> (para de receber), <b>quero oferta</b> (volta a receber), <b>cupom</b> (o robô pergunta de qual loja, com as opções numeradas, e manda os cupons ativos da loja com seu link da tela Cupons, na hora, sem esperar o limite; <b>cupom shopee</b> pula a pergunta). Pedido = qualquer texto, ex.: "fone bluetooth". Pedido de uma palavra só ("tv", "celular", "furadeira"...) faz o robô perguntar tamanho, marca e modelo antes de buscar (os produtos mais comuns têm perguntas próprias); a resposta do cliente vira a busca ("tv 50 samsung 4k"). Com a opção acima ligada, o robô também pergunta em qual loja buscar (as lojas marcadas ou qualquer uma) quando o cliente não disse; a resposta vale 30 min e não gasta o limite por tempo. Toda mensagem recebe resposta, até áudio e foto ("escreva o produto"). Na primeira conversa o robô pergunta o nome do cliente e passa a chamá-lo pelo nome.</p>
       </div>
 
       <div className="card">

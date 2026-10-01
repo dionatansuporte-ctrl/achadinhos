@@ -4,18 +4,16 @@ import { api } from './api';
 import { notify } from './notify';
 import { brl, typingMoney, blurMoney } from './money';
 import { previewOffer } from './offerPreview';
+import { mktName, mktIcon, type Mkt } from './marketplaces';
 
 /**
- * Cupons da Shopee e do Mercado Livre.
- * Nenhuma das duas dá cupom por API, então o usuário cadastra (ou cola a lista do Telegram,
+ * Cupons da Shopee, do Mercado Livre e da Amazon.
+ * Nenhuma delas dá cupom por API, então o usuário cadastra (ou cola a lista do Telegram,
  * ou aponta um canal público para importar sozinho). O "listão" de cada marketplace sai para
  * os grupos no intervalo escolhido, só com cupons válidos, e com o link do usuário.
  */
 
-type Mkt = 'SHOPEE' | 'MERCADO_LIVRE';
-const MKTS: Mkt[] = ['MERCADO_LIVRE', 'SHOPEE'];
-const mktName = (m: Mkt) => (m === 'SHOPEE' ? 'Shopee' : 'Mercado Livre');
-const mktIcon = (m: Mkt) => (m === 'SHOPEE' ? '🛍️' : '🟡');
+const MKTS: Mkt[] = ['MERCADO_LIVRE', 'SHOPEE', 'AMAZON'];
 const INTERVALS = [[0, 'Não envia sozinho'], [60, '1 h'], [120, '2 h'], [180, '3 h'], [240, '4 h'], [360, '6 h']] as const;
 
 const dateInput = (iso?: string | null) => (iso ? new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }) : '');
@@ -63,7 +61,7 @@ export default function Coupons() {
   }
 
   return <section className="page">
-    <div className="page-title-row"><div><h1>Cupons</h1><p>Cadastre os cupons que você pegou e o robô manda o listão para os grupos no intervalo escolhido, só com cupons válidos e com o seu link. Nem a Shopee nem o Mercado Livre entregam cupom por API.</p></div></div>
+    <div className="page-title-row"><div><h1>Cupons</h1><p>Cadastre os cupons que você pegou e o robô manda o listão para os grupos no intervalo escolhido, só com cupons válidos e com o seu link. Nenhuma das lojas (Shopee, Mercado Livre, Amazon) entrega cupom por API.</p></div></div>
 
     <div className="choice-grid choice-grid-tight" style={{ maxWidth: 480 }}>
       {MKTS.map(m => <button key={m} type="button" className={mkt === m ? 'chosen' : ''} onClick={() => setMkt(m)}>{mktIcon(m)} {mktName(m)} <small className="muted" style={{ margin: 0 }}>({data.coupons.filter(c => c.marketplace === m && c.enabled && !c.expired).length} válidos)</small></button>)}
@@ -86,8 +84,8 @@ export default function Coupons() {
         ? <p className="hint">Só os grupos marcados recebem. Clique em <b>Automático</b> para voltar a seguir as automações {mktName(mkt)}.</p>
         : <p className="hint"><b>Automático:</b> o listão vai para os grupos das automações {mktName(mkt)} ativas{sch.groups?.length ? <> (hoje: {sch.groups.map((g: any) => g.name).join(', ')})</> : ' (nenhum ainda)'}. Grupo novo entra sozinho assim que for usado numa automação {mktName(mkt)}. Cupom do Mercado Livre nunca cai em grupo Shopee, e vice-versa.</p>}
 
-      <label>Seu link {mkt === 'SHOPEE' ? 'da carteira de cupons Shopee' : 'de afiliado do Mercado Livre'} (vai no fim do listão)</label>
-      <LinkField value={sch.link || ''} onSave={v => saveSchedule({ link: v })} placeholder={mkt === 'SHOPEE' ? 'https://shopee.com.br/user/voucher-wallet?...&utm_source=an_SEUID' : 'https://www.mercadolivre.com.br/cupons?matt_tool=SEUID'} />
+      <label>Seu link {mkt === 'SHOPEE' ? 'da carteira de cupons Shopee' : mkt === 'AMAZON' ? 'da página de cupons da Amazon (com a sua tag)' : 'de afiliado do Mercado Livre'} (vai no fim do listão)</label>
+      <LinkField value={sch.link || ''} onSave={v => saveSchedule({ link: v })} placeholder={mkt === 'SHOPEE' ? 'https://shopee.com.br/user/voucher-wallet?...&utm_source=an_SEUID' : mkt === 'AMAZON' ? 'https://www.amazon.com.br/cupons?tag=seunome-20' : 'https://www.mercadolivre.com.br/cupons?matt_tool=SEUID'} />
       <p className="hint">Use o SEU link. O link que vem nas listas do Telegram é de outro afiliado e não conta comissão para você.</p>
 
       <label>Canal público do Telegram para importar sozinho (opcional) <em>vários: separe por vírgula. Só entram os cupons ativos da loja: lista mais recente + alertas das últimas 24 h</em></label>

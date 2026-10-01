@@ -9,6 +9,7 @@ export function Commission({ rate, value, marketplace, compact }: { rate?: numbe
   const v = value != null ? Number(value) : undefined;
   if (r == null && v == null) {
     if (marketplace === 'MERCADO_LIVRE') return <span className="commission none" title="O Mercado Livre não informa a comissão por API. Veja no portal de afiliados.">Comissão: ver no portal ML</span>;
+    if (marketplace === 'AMAZON') return <span className="commission none" title="A Amazon não informa a comissão por API; o percentual depende da categoria. Veja no portal de associados.">Comissão: ver no portal Amazon</span>;
     return null;
   }
   const pct = r != null ? `${r.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}%` : '';

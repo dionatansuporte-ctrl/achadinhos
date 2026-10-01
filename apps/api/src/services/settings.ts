@@ -11,6 +11,7 @@ import { encryptSecret, decryptSecret } from './crypto';
 export const SETTING_KEYS = [
   'ML_CLIENT_ID', 'ML_CLIENT_SECRET', 'ML_REDIRECT_URI',
   'SHOPEE_APP_ID', 'SHOPEE_SECRET', 'SHOPEE_AFFILIATE_SUFFIX', 'ML_AFFILIATE_SUFFIX',
+  'AMAZON_PARTNER_TAG', 'AMAZON_CREDENTIAL_ID', 'AMAZON_CREDENTIAL_SECRET',
   'META_ACCESS_TOKEN', 'META_PHONE_NUMBER_ID', 'META_WABA_ID', 'META_IG_USER_ID', 'META_API_VERSION',
   'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'
 ] as const;
@@ -66,7 +67,7 @@ export async function describeSecret(key: SettingKey) {
 function mask(key: SettingKey, value: string) {
   if (!value) return '';
   // Identificadores públicos podem aparecer por extenso; segredos, não.
-  const publicKeys: string[] = ['SHOPEE_AFFILIATE_SUFFIX', 'ML_AFFILIATE_SUFFIX', 'ML_REDIRECT_URI', 'META_API_VERSION', 'ML_CLIENT_ID', 'SHOPEE_APP_ID', 'META_PHONE_NUMBER_ID', 'META_WABA_ID', 'META_IG_USER_ID', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_FROM'];
+  const publicKeys: string[] = ['SHOPEE_AFFILIATE_SUFFIX', 'ML_AFFILIATE_SUFFIX', 'AMAZON_PARTNER_TAG', 'AMAZON_CREDENTIAL_ID', 'ML_REDIRECT_URI', 'META_API_VERSION', 'ML_CLIENT_ID', 'SHOPEE_APP_ID', 'META_PHONE_NUMBER_ID', 'META_WABA_ID', 'META_IG_USER_ID', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_FROM'];
   if (publicKeys.includes(key)) return value;
   return value.length <= 4 ? '••••' : `••••${value.slice(-4)}`;
 }

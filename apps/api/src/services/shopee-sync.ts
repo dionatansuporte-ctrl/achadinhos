@@ -2,19 +2,22 @@ import type { Product } from '@prisma/client';
 import { prisma } from '../db';
 import { searchShopeeBest, type ShopeeOffer, type ShopeeSort } from '../integrations/shopee';
 import { searchMercadoLivreOffers } from '../integrations/mercadolivre-search';
+import { searchAmazonOffers } from '../integrations/amazon';
+import { isMarketplace, marketplaceLabel, type SearchMarketplace } from './marketplaces';
+
+export { marketplaceLabel, type SearchMarketplace };
 
 /**
  * Regra "buscar no marketplace" gravada em Automation.rulesJson.shopeeSearch.
- * O nome do campo ficou por compatibilidade; `marketplace` escolhe Shopee (padrão) ou Mercado Livre.
- * `marketplaces` permite marcar os dois: a rodada é dividida entre eles e os resultados intercalados.
+ * O nome do campo ficou por compatibilidade; `marketplace` escolhe Shopee (padrão), Mercado Livre ou Amazon.
+ * `marketplaces` permite marcar várias: a rodada é dividida entre elas e os resultados intercalados.
  */
-export type SearchMarketplace = 'SHOPEE' | 'MERCADO_LIVRE';
 export type ShopeeSearchRule = {
   marketplace?: SearchMarketplace;
   marketplaces?: SearchMarketplace[];
   keyword?: string;               // legado: um termo só
   keywords?: string[];            // vários nichos/termos; a busca roda em cada um e mistura
-  categoryId?: number | string;   // Shopee: número; Mercado Livre: "MLB1051"
+  categoryId?: number | string;   // Shopee: número; Mercado Livre: "MLB1051"; Amazon: índice ("Electronics")
   sort?: ShopeeSort | 'BOTH';    // legado: um critério só
   sorts?: string[];              // vários critérios marcados; quem aparece bem em mais de um sobe
   limit?: number;
@@ -61,19 +64,17 @@ export function hasShopeeSearch(rules: any): rules is { shopeeSearch: ShopeeSear
   return !!s && (ruleKeywords(s).length > 0 || !!s.categoryId);
 }
 
-export const marketplaceLabel = (m?: string) => (m === 'MERCADO_LIVRE' ? 'Mercado Livre' : 'Shopee');
-
-/** Marketplaces da regra: `marketplaces` novo (um ou os dois) ou `marketplace` legado; padrão Shopee. */
+/** Marketplaces da regra: `marketplaces` novo (uma ou várias lojas) ou `marketplace` legado; padrão Shopee. */
 export function ruleMarketplaces(rule: ShopeeSearchRule): SearchMarketplace[] {
-  const list = (Array.isArray(rule.marketplaces) ? rule.marketplaces : []).filter((m): m is SearchMarketplace => m === 'SHOPEE' || m === 'MERCADO_LIVRE');
+  const list = (Array.isArray(rule.marketplaces) ? rule.marketplaces : []).filter(isMarketplace);
   if (list.length) return [...new Set(list)];
-  return [rule.marketplace === 'MERCADO_LIVRE' ? 'MERCADO_LIVRE' : 'SHOPEE'];
+  return [isMarketplace(rule.marketplace) ? rule.marketplace : 'SHOPEE'];
 }
 
-/** "Shopee", "Mercado Livre" ou "Shopee + Mercado Livre", para logs e tela. */
+/** "Shopee", "Mercado Livre" ou "Shopee + Amazon", para logs e tela. */
 export const searchMarketplaceLabel = (rule: ShopeeSearchRule) => ruleMarketplaces(rule).map(marketplaceLabel).join(' + ');
 
-/** Regra restrita a um marketplace só (sem categoria quando a original misturava os dois, pois o ID é de cada loja). */
+/** Regra restrita a um marketplace só (sem categoria quando a original misturava lojas, pois o ID é de cada loja). */
 function ruleFor(rule: ShopeeSearchRule, marketplace: SearchMarketplace, limit: number): ShopeeSearchRule {
   const mixed = ruleMarketplaces(rule).length > 1;
   return { ...rule, marketplace, marketplaces: undefined, limit, categoryId: mixed ? undefined : rule.categoryId };
@@ -113,6 +114,10 @@ async function searchOneSort(userId: string, rule: ShopeeSearchRule, keyword: st
     const s = sort === 'RELEVANCE' ? 'RELEVANCE' : sort === 'TRENDING' ? 'TRENDING' : 'SALES';
     return searchMercadoLivreOffers({ userId, keyword, categoryId: rule.categoryId ? String(rule.categoryId) : undefined, sort: s, limit, page, minDiscount: rule.minDiscount });
   }
+  if (rule.marketplace === 'AMAZON') {
+    // Amazon não ordena por vendas nem comissão: só "relevância" ou o destaque dela (Featured).
+    return searchAmazonOffers({ keyword, searchIndex: rule.categoryId ? String(rule.categoryId) : undefined, sort: sort === 'RELEVANCE' ? 'RELEVANCE' : 'SALES', limit, page, minDiscount: rule.minDiscount });
+  }
   return searchShopeeBest({ keyword, categoryId: rule.categoryId ? Number(rule.categoryId) : undefined, sort: sort as ShopeeSort | 'BOTH', limit, page });
 }
 
@@ -122,7 +127,8 @@ async function searchOneSort(userId: string, rule: ShopeeSearchRule, keyword: st
  * e de maior comissão fica na frente. Um critério que falhar não derruba os outros.
  */
 async function searchOne(userId: string, rule: ShopeeSearchRule, keyword: string | undefined, limit: number, page: number): Promise<ShopeeOffer[]> {
-  const sorts = [...new Set(ruleSorts(rule).map(s => rule.marketplace === 'MERCADO_LIVRE' && (s === 'COMMISSION' || s === 'BOTH') ? 'SALES' : s))];
+  const sorts = [...new Set(ruleSorts(rule).map(s => rule.marketplace === 'AMAZON' ? (s === 'RELEVANCE' ? 'RELEVANCE' : 'SALES')
+    : rule.marketplace === 'MERCADO_LIVRE' && (s === 'COMMISSION' || s === 'BOTH') ? 'SALES' : s))];
   if (sorts.length === 1) return searchOneSort(userId, rule, keyword, sorts[0], limit, page);
   const lists = await Promise.all(sorts.map(s => searchOneSort(userId, rule, keyword, s, limit, page).catch(() => [] as ShopeeOffer[])));
   if (lists.every(l => !l.length)) await searchOneSort(userId, rule, keyword, sorts[0], limit, page); // devolve o erro real
@@ -144,7 +150,7 @@ export async function searchOffers(userId: string, rule: ShopeeSearchRule, page 
   const limit = rule.limit || 10;
   const marketplaces = ruleMarketplaces(rule);
   if (marketplaces.length > 1) {
-    // Os dois marcados: metade da rodada em cada um, resultados intercalados. Um que falhar não derruba o outro.
+    // Várias marcadas: a rodada é dividida entre elas, resultados intercalados. Uma que falhar não derruba as outras.
     const per = Math.max(3, Math.ceil(limit / marketplaces.length));
     const lists = await Promise.all(marketplaces.map(m => searchOffers(userId, ruleFor(rule, m, per), page).catch(() => [] as ShopeeOffer[])));
     if (lists.every(l => !l.length)) await searchOffers(userId, ruleFor(rule, marketplaces[0], per), page); // devolve o erro real
@@ -193,7 +199,7 @@ async function searchOffersSingle(userId: string, rule: ShopeeSearchRule, limit:
 export async function syncShopeeProducts(userId: string, rule: ShopeeSearchRule, listId?: string | null, page = 1): Promise<Product[]> {
   const marketplaces = ruleMarketplaces(rule);
   if (marketplaces.length > 1) {
-    // Os dois marcados: importa de cada um (cada qual na própria conta de afiliado) e intercala.
+    // Várias marcadas: importa de cada uma (cada qual na própria conta de afiliado) e intercala.
     const limit = rule.limit || 10;
     const per = Math.max(3, Math.ceil(limit / marketplaces.length));
     const lists = await Promise.all(marketplaces.map(m => syncShopeeProducts(userId, ruleFor(rule, m, per), listId, page).catch(() => [] as Product[])));
@@ -206,7 +212,7 @@ export async function syncShopeeProducts(userId: string, rule: ShopeeSearchRule,
 
   const account = await prisma.affiliateAccount.upsert({
     where: { userId_marketplace: { userId, marketplace } },
-    create: { userId, marketplace, displayName: marketplace === 'SHOPEE' ? 'Shopee Affiliate (Open API)' : 'Mercado Livre' },
+    create: { userId, marketplace, displayName: marketplace === 'SHOPEE' ? 'Shopee Affiliate (Open API)' : marketplace === 'AMAZON' ? 'Amazon Associados' : 'Mercado Livre' },
     update: {}
   });
 

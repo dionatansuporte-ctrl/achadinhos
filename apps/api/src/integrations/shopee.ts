@@ -38,7 +38,7 @@ export type ShopeeOffer = {
   shopName?: string;
   productUrl: string;
   affiliateUrl: string;
-  marketplace?: 'SHOPEE' | 'MERCADO_LIVRE'; // preenchido pela busca (útil quando a regra mistura os dois)
+  marketplace?: 'SHOPEE' | 'MERCADO_LIVRE' | 'AMAZON'; // preenchido pela busca (útil quando a regra mistura lojas)
 };
 
 async function credentials() {

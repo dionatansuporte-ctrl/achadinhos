@@ -1,4 +1,4 @@
-export type Marketplace = 'SHOPEE' | 'MERCADO_LIVRE' | 'OUTRO';
+export type Marketplace = 'SHOPEE' | 'MERCADO_LIVRE' | 'AMAZON' | 'OUTRO';
 
 export type ParsedOffer = {
   id: string;
@@ -32,7 +32,21 @@ export function parseMoney(raw: string): number | undefined {
 function marketplaceOf(url: string): Marketplace {
   if (/shopee\.|shope\.ee/i.test(url)) return 'SHOPEE';
   if (/mercadoliv|mercadolibre|mlb|\bmeli\b/i.test(url)) return 'MERCADO_LIVRE';
+  if (/amazon\.com|amzn\.to|amzn\.com|\/\/a\.co\//i.test(url)) return 'AMAZON';
   return 'OUTRO';
+}
+
+/**
+ * Prévia do link da Amazon com a tag do usuário (mesma regra da API): link com ASIN vira
+ * amazon.com.br/dp/ASIN?tag=..., sem o rastreio de quem postou. Link curto (amzn.to) só a API
+ * consegue abrir; aqui ele aparece como veio e a importação troca pela tag certa.
+ */
+export function amazonLink(url: string, tag?: string): string {
+  const t = (tag || '').trim();
+  const asin = /(?:\/dp\/|\/gp\/product\/|\/gp\/aw\/d\/)([A-Z0-9]{10})(?=[/?#&]|$)/i.exec(url)?.[1]?.toUpperCase();
+  if (asin) return `https://www.amazon.com.br/dp/${asin}${t ? `?tag=${encodeURIComponent(t)}` : ''}`;
+  if (!t || /amzn\.to|\/\/a\.co\//i.test(url)) return url;
+  try { const u = new URL(url); u.searchParams.set('tag', t); return u.toString(); } catch { return url; }
 }
 
 /**
