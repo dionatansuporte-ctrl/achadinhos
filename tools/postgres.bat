@@ -29,7 +29,8 @@ goto start
 :start
 if not exist "%PGDATA%\PG_VERSION" (
   echo   Primeira vez: criando o banco em "%PGDATA%"...
-  echo postgres> "%TEMP%\ofertasdahora-pgpw.txt"
+  REM Senha forte gerada agora e guardada criptografada (DPAPI) em apps\api\.db-secret.
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0db-senha.ps1" nova > "%TEMP%\ofertasdahora-pgpw.txt"
   "%PGBIN%\initdb.exe" -D "%PGDATA%" -U postgres --pwfile="%TEMP%\ofertasdahora-pgpw.txt" -A scram-sha-256 -E UTF8 --locale=C --locale-provider=icu --icu-locale=pt-BR >> "%ROOT%\logs\postgres.log" 2>&1
   del "%TEMP%\ofertasdahora-pgpw.txt" >nul 2>&1
   if errorlevel 1 (echo   ERRO ao criar o banco. Veja logs\postgres.log & exit /b 1)
@@ -45,7 +46,7 @@ if exist "%PGDATA%\postmaster.pid" powershell -NoProfile -ExecutionPolicy Bypass
 "%PGBIN%\pg_ctl.exe" -D "%PGDATA%" -l "%ROOT%\logs\postgres.log" -w -t 60 start >nul 2>&1
 "%PGBIN%\pg_isready.exe" -h localhost -p 5432 >nul 2>&1
 if errorlevel 1 (echo   ERRO: o PostgreSQL nao subiu. Veja logs\postgres.log & exit /b 1)
-set "PGPASSWORD=postgres"
+call "%~dp0db-env.bat"
 "%PGBIN%\psql.exe" -h localhost -U postgres -d postgres -Atq -c "SELECT 1 FROM pg_database WHERE datname='achadinhopro'" 2>nul | findstr /x 1 >nul
 if errorlevel 1 (
   echo   criando o banco achadinhopro...
@@ -63,6 +64,6 @@ exit /b %errorlevel%
 exit /b %errorlevel%
 
 :psql
-set "PGPASSWORD=postgres"
+call "%~dp0db-env.bat"
 "%PGBIN%\psql.exe" -h localhost -U postgres -d achadinhopro
 exit /b %errorlevel%

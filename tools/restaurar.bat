@@ -60,7 +60,8 @@ echo [5/6] Ligando o PostgreSQL e restaurando o banco...
 cd /d "%ROOT%"
 call "%ROOT%\tools\postgres.bat" start
 if errorlevel 1 (echo O PostgreSQL nao subiu. Veja logs\postgres.log e rode de novo. & pause & exit /b 1)
-set "PGPASSWORD=postgres"
+REM Senha do banco DESTA maquina (criptografada em apps\api\.db-secret); vale tambem para o Prisma abaixo.
+call "%ROOT%\tools\db-env.bat"
 "%PGSQL_DIR%\bin\psql.exe" -h localhost -U postgres -d achadinhopro -v ON_ERROR_STOP=0 -q -f "%TMPD%\db.sql" >nul
 if errorlevel 1 (echo   Aviso: o psql reportou erros; confira se o sistema abre normalmente.)
 cd /d "%ROOT%\apps\api"

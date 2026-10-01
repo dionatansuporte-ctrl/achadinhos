@@ -76,9 +76,11 @@ const FILLER_RE = /\b(quero|queria|gostaria|preciso|procuro|procurando|estou|to|
 // Aceita os erros de escrita comuns: "shope", "shopi", "xopee", "mercado libre", "mercadolivre", "mercado" sozinho
 // (em 2026-09-26 um cliente respondeu "mercado libre" e o robô achou que era produto novo e perguntou a loja de novo).
 const SHOPEE_RE = /\b(shopp?e+|shopi|shopy|shop|xopee?|xopi|chopee)\b/i;
-const ML_RE = /\bmercado\s*li[bv]r[ei]s?\b|\bmercadoli[bv]r[ei]\b|\bmeli\b|\bml\b|\bmercad[oa]\b/i;
+// "ml" depois de número é mililitro ("perfume 100 ml", "100ml"), não Mercado Livre; "mercado" sozinho só
+// vale como a mensagem inteira (resposta à pergunta da loja), senão "carrinho de mercado" viraria ML.
+const ML_RE = /\bmercado\s*li[bv]r[ei]s?\b|\bmercadoli[bv]r[ei]\b|\bmeli\b|(?<!\d\s?)\bml\b|^\W*mercad[oa]\W*$/i;
 const AMAZON_RE = /\b(amazo[nm]|amaz[oô]n|amason|amazom|amzn)\b/i;
-const BOTH_RE = /\b(os dois|as duas|nos dois|nas duas|ambos|ambas|todos|todas|tanto faz|qualquer|nenhuma?|indiferente|os 2|as 3|os 3|as tr[eê]s|nas tr[eê]s|2)\b/i;
+const BOTH_RE = /\b(os dois|as duas|nos dois|nas duas|ambos|ambas|todos|todas|tanto faz|qualquer|nenhuma?|indiferente|os 2|as 3|os 3|as tr[eê]s|nas tr[eê]s)\b/i; // "2" sozinho é tratado por numberChoice; aqui apagaria o 2 de "playstation 2"
 const STORE_RES: [SearchMarketplace, RegExp][] = [['SHOPEE', SHOPEE_RE], ['MERCADO_LIVRE', ML_RE], ['AMAZON', AMAZON_RE]];
 export type MarketplaceChoice = Marketplace | 'ALL';
 export function marketplaceIn(text: string): MarketplaceChoice | null {
@@ -320,7 +322,7 @@ async function sendCouponsTo(bot: CustomerBot, customer: Customer, text: string,
   const marketplaces = chosenMarketplaces(bot, choice);
   const key = marketplaces.join(',');
   const recent = await prisma.customerRequest.findFirst({ where: { customerId: customer.id, status: 'COUPONS', keyword: key, createdAt: { gt: new Date(Date.now() - COUPON_REPEAT_MS) } }, select: { id: true } });
-  if (recent) { await log(customer.id, { text, keyword: key, status: 'LIMITED' }); return; }
+  if (recent) { await log(customer.id, { text, keyword: key, status: 'COUPONS_REPEAT' }); return; }
   const texts = bot.sendCoupons ? await couponMessages(customer.userId, marketplaces) : [];
   const loja = marketplaces.length === 1 ? ` ${storeOf(marketplaces[0])}` : '';
   const replyText = texts.length ? texts.join('\n\n') : `Poxa${vocative(customer)}, no momento não tenho cupom válido${loja}. 😕 Mas me diga um produto e eu busco a melhor oferta pra você! 😊`;
@@ -706,6 +708,9 @@ async function deliverPendingSearches() {
   for (const r of pending) {
     const c = r.customer;
     // Só o pedido mais novo de cada cliente vale; pedido anterior à última entrega já foi atendido.
+    // Linhas antigas de "cupom repetido" gravavam a loja ("SHOPEE,MERCADO_LIVRE") como LIMITED: não é busca.
+    const notSearch = /^(SHOPEE|MERCADO_LIVRE|AMAZON)(,(SHOPEE|MERCADO_LIVRE|AMAZON))*$/.test(r.keyword || '');
+    if (notSearch) { await prisma.customerRequest.update({ where: { id: r.id }, data: { status: 'COUPONS_REPEAT' } }); continue; }
     const superseded = seen.has(c.id) || (!!c.lastRequestAt && c.lastRequestAt > r.createdAt);
     seen.add(c.id);
     if (superseded) { await prisma.customerRequest.update({ where: { id: r.id }, data: { status: 'LIMITED_SENT' } }); continue; }

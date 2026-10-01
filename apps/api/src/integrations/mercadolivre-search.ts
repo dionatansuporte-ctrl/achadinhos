@@ -61,7 +61,8 @@ export function applyAffiliateSuffix(url: string, suffix?: string) {
   if (!s) return url;
   try {
     const u = new URL(url);
-    for (const pair of s.split('&')) { const [k, ...rest] = pair.split('='); if (k) u.searchParams.set(k, rest.join('=')); }
+    // Decodifica antes do set (que codifica de novo): "jo%C3%A3o" não pode virar "jo%25C3%25A3o".
+    for (const [k, v] of new URLSearchParams(s)) u.searchParams.set(k, v);
     return u.toString();
   } catch { return url + (url.includes('?') ? '&' : '?') + s; }
 }

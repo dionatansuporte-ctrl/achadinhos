@@ -29,10 +29,12 @@ export async function executePromotionJob(jobId:string){
     if(job.channel.type==='WHATSAPP') await sendWhatsAppText(job.channel.destination,payload.text||'');
     else if(job.channel.type==='WHATSAPP_GROUP') await sendToWhatsAppGroup(job.channel.destination,payload.text||'',payload.imageUrl,jobId);
     else { if(!payload.imageUrl) throw new Error('Instagram exige imageUrl pública para publicação.'); await publishInstagramImage(payload.imageUrl,payload.text||''); }
-    await prisma.promotionJob.update({where:{id:jobId},data:{status:'SENT',sentAt:new Date(),errorMessage:null}});
-    await prisma.automationLog.create({data:{automationId:job.automationId,channel:job.channel.type,action:'SEND',status:'OK',message:`Envio realizado: ${job.channel.name}`}});
   }catch(e:any){
-    await prisma.promotionJob.update({where:{id:jobId},data:{status:'FAILED',errorMessage:e.message}});
-    await prisma.automationLog.create({data:{automationId:job.automationId,channel:job.channel.type,action:'SEND',status:'ERROR',message:e.message}}); throw e;
+    await prisma.promotionJob.update({where:{id:jobId},data:{status:'FAILED',errorMessage:e.message}}).catch(()=>{});
+    await prisma.automationLog.create({data:{automationId:job.automationId,channel:job.channel.type,action:'SEND',status:'ERROR',message:e.message}}).catch(()=>{}); throw e;
   }
+  // Já saiu: daqui em diante um erro do banco NÃO pode virar FAILED, senão a fila tenta de novo e manda em dobro.
+  await prisma.promotionJob.update({where:{id:jobId},data:{status:'SENT',sentAt:new Date(),errorMessage:null}})
+    .catch(e=>console.error(`[envio] ${jobId} saiu, mas não consegui marcar SENT:`,e.message));
+  await prisma.automationLog.create({data:{automationId:job.automationId,channel:job.channel.type,action:'SEND',status:'OK',message:`Envio realizado: ${job.channel.name}`}}).catch(()=>{});
 }

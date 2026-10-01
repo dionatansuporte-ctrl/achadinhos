@@ -44,7 +44,9 @@ const DISCOUNT_START = /^(R?\$\s*\d|\d+\s*%|\d+\s*(off|reais)|-)/i;
 /** "R$1.599,90" / "1599" / "79" → número. */
 function money(v?: string): number | undefined {
   if (!v) return undefined;
-  const n = Number(v.replace(/\./g, '').replace(',', '.'));
+  // "79.90" (ponto decimal, um só e 1-2 casas) é 79,90; "1.299" e "1.299,90" usam ponto de milhar.
+  const dotDecimal = !v.includes(',') && /^\d+\.\d{1,2}$/.test(v);
+  const n = Number(dotDecimal ? v : v.replace(/\./g, '').replace(',', '.'));
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
@@ -149,8 +151,9 @@ export async function fetchTelegramChannel(channel: string): Promise<TelegramPos
  */
 export function postMarketplace(text: string): Marketplace | 'OTHER' | null {
   if (/shopee|shope\b|s\.shopee\.com/i.test(text)) return 'SHOPEE';
-  if (/mercado\s*livre|mercadolivre|mercadolibre|\bmeli\b|\bml\b/i.test(text)) return 'MERCADO_LIVRE';
+  // Amazon antes do ML: "AMAZON: shampoo 400 ml" tem "ml" (mililitro) e caía no listão do Mercado Livre.
   if (/amazon|amzn\.to|\ba\.co\//i.test(text)) return 'AMAZON';
+  if (/mercado\s*livre|mercadolivre|mercadolibre|\bmeli\b|(?<!\d\s?)\bml\b/i.test(text)) return 'MERCADO_LIVRE';
   if (/magalu|magazine\s*luiza|magazinevoce|americanas|aliexpress|casas\s*bahia|kabum|netshoes|centauro|natura|boticario|ifood|temu|shein/i.test(text)) return 'OTHER';
   return null;
 }
@@ -208,8 +211,9 @@ export async function importTelegramCoupons(userId: string, marketplace: Marketp
   if (!names.length) throw new Error('Informe o canal público do Telegram (ex.: melicupons).');
   const found: ChannelCoupon[] = [];
   const errors: string[] = [];
+  const answered: string[] = [];
   for (const name of names) {
-    try { found.push(...await activeChannelCoupons(name, marketplace)); }
+    try { found.push(...await activeChannelCoupons(name, marketplace)); answered.push(telegramChannelName(name).toLowerCase()); }
     catch (e: any) { errors.push(`${name}: ${e.message}`); }
   }
   if (errors.length === names.length) throw new Error(errors.join(' | '));
@@ -237,7 +241,9 @@ export async function importTelegramCoupons(userId: string, marketplace: Marketp
       added++;
     }
   }
-  const gone = current.filter(c => !byCodeNew.has(c.code));
+  // Só sai o cupom de canal que respondeu agora: canal fora do ar não apaga os cupons dele (sourceRef = "canal/123").
+  const fromAnswered = (ref?: string | null) => !ref || answered.includes(ref.split('/')[0].toLowerCase());
+  const gone = current.filter(c => !byCodeNew.has(c.code) && fromAnswered(c.sourceRef));
   if (gone.length) await prisma.coupon.deleteMany({ where: { id: { in: gone.map(c => c.id) } } });
   const refs = [...new Set([...byCodeNew.values()].map(c => c.ref))];
   return { post: refs.join(', '), at: undefined as string | undefined, total: byCodeNew.size, added, updated, removed: gone.length, errors };

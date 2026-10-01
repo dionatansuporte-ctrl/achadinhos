@@ -32,7 +32,18 @@ export type RunResult = { jobs: number; products: number; skipped: number; messa
 const MAX_SHOPEE_PAGES = 5;
 export const DEFAULT_REPEAT_AFTER_DAYS = 3;
 
-export async function runAutomation(automationId: string, opts: { source: 'manual' | 'scheduler'; perRun?: number }): Promise<RunResult> {
+// Uma rodada por automação de cada vez: o "Testar 1 envio" manual junto com o agendador liam o histórico
+// ao mesmo tempo e enfileiravam o mesmo produto duas vezes para o mesmo grupo.
+const running = new Map<string, Promise<unknown>>();
+export function runAutomation(automationId: string, opts: { source: 'manual' | 'scheduler'; perRun?: number }): Promise<RunResult> {
+  const prev = running.get(automationId) || Promise.resolve();
+  const next = prev.catch(() => {}).then(() => runAutomationNow(automationId, opts));
+  running.set(automationId, next);
+  next.finally(() => { if (running.get(automationId) === next) running.delete(automationId); }).catch(() => {});
+  return next;
+}
+
+async function runAutomationNow(automationId: string, opts: { source: 'manual' | 'scheduler'; perRun?: number }): Promise<RunResult> {
   const a = await prisma.automation.findUnique({ where: { id: automationId }, include: { list: { include: { products: { include: { product: true } } } } } });
   if (!a) throw new Error('Automação não encontrada.');
 

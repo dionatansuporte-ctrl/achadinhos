@@ -185,7 +185,8 @@ export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: 
   if (!sock || status !== 'connected') throw new Error('WhatsApp não conectado. Escaneie o QR code em Canais.');
   // Aceita JID de grupo (@g.us), JID de contato ou só o telefone.
   const to = jid.includes('@') ? jid : `${jid.replace(/\D/g, '')}@s.whatsapp.net`;
-  if (imageUrl) {
+  // Só imagem da internet: com outro valor ("C:/...") o Baileys lê o arquivo do PC e manda no grupo.
+  if (imageUrl && /^https?:\/\//i.test(imageUrl)) {
     // Foto do produto com o texto como legenda. Se a imagem falhar (link expirado,
     // bloqueio da CDN), a oferta ainda sai em texto.
     try {

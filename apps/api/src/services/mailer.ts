@@ -17,10 +17,13 @@ async function transport() {
   return nodemailer.createTransport({ host, port, secure: port === 465, auth: { user, pass } });
 }
 
+// O texto leva dados digitados por terceiros (nome no cadastro): sem escapar, vira link/HTML no e-mail do admin.
+const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
 export async function sendMail(to: string, subject: string, text: string, html?: string) {
   const t = await transport();
   const from = (await getSecret('SMTP_FROM')) || (await getSecret('SMTP_USER'))!;
-  await t.sendMail({ from: from.includes('<') ? from : `Robô das Ofertas <${from}>`, to, subject, text, html: html || `<pre style="font:15px system-ui">${text}</pre>` });
+  await t.sendMail({ from: from.includes('<') ? from : `Robô das Ofertas <${from}>`, to, subject, text, html: html || `<pre style="font:15px system-ui">${escapeHtml(text)}</pre>` });
 }
 
 export async function sendPasswordResetCode(to: string, code: string, minutes: number) {

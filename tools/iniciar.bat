@@ -21,6 +21,8 @@ if errorlevel 1 (
 REM ---------- 2) Migracoes pendentes (seguro: so aplica o que falta) ----------
 echo [2/4] Migracoes do banco...
 pushd apps\api
+REM O Prisma CLI precisa da senha do banco, que nao fica mais no .env (ver tools\db-senha.ps1).
+call "%~dp0db-env.bat"
 call npx prisma migrate deploy >> ..\..\logs\migrate.log 2>&1
 if errorlevel 1 (
   echo   AVISO: migracao falhou, veja logs\migrate.log. Seguindo mesmo assim.

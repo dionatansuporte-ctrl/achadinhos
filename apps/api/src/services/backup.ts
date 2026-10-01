@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { applyDbSecret } from '../db-secret';
 
 /**
  * Backup completo do Robô das Ofertas em um .zip, para restaurar aqui ou em outra máquina:
@@ -22,12 +23,26 @@ export const AUTO_EVERY_DAYS = 5;
 
 export type BackupInfo = { file: string; size: number; createdAt: Date; kind: 'manual' | 'auto' };
 
-function run(cmd: string, args: string[], opts: { cwd?: string; input?: string } = {}) {
-  const r = spawnSync(cmd, args, { cwd: opts.cwd || ROOT, encoding: 'utf8', input: opts.input, maxBuffer: 512 * 1024 * 1024, windowsHide: true });
-  return r;
+/**
+ * Roda um programa sem travar o processo. O backup roda dentro da API, junto com a sessão do
+ * WhatsApp e o atendimento: com spawnSync tudo ficava parado os minutos do backup (e o WhatsApp
+ * podia cair). `stdoutFile` manda a saída direto para um arquivo (o dump do banco).
+ */
+function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; stdoutFile?: string } = {}) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>(resolve => {
+    const out = opts.stdoutFile ? fs.openSync(opts.stdoutFile, 'w') : null;
+    let stdout = '', stderr = '';
+    const p = spawn(cmd, args, { cwd: opts.cwd || ROOT, env: opts.env, windowsHide: true, stdio: ['ignore', out ?? 'pipe', 'pipe'] });
+    p.stdout?.on('data', d => { if (stdout.length < 1_000_000) stdout += d; });
+    p.stderr?.on('data', d => { if (stderr.length < 100_000) stderr += d; });
+    const done = (status: number | null, err?: Error) => { if (out !== null) fs.closeSync(out); resolve({ status, stdout, stderr: stderr || err?.message || '' }); };
+    p.on('error', e => done(-1, e));
+    p.on('close', code => done(code));
+  });
 }
 
 function dbParts() {
+  applyDbSecret(); // o backup.bat roda sem a API: abre a senha do banco aqui também
   const url = new URL(process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/achadinhopro');
   return {
     user: decodeURIComponent(url.username || 'postgres'),
@@ -48,17 +63,17 @@ function findPgDump(): string | null {
 }
 
 /** Dump do banco com o pg_dump do PostgreSQL portátil. */
-function dumpDatabase(to: string) {
+async function dumpDatabase(to: string) {
   const { user, password, host, port, db } = dbParts();
   const pgDump = findPgDump();
   if (!pgDump) throw new Error('Não achei pgsql\\bin\\pg_dump.exe. Extraia o PostgreSQL em "C:\\Criar sites\\pgsql" ou defina PGSQL_DIR.');
-  const r = spawnSync(pgDump, ['-h', host, '-p', port, '-U', user, '--clean', '--if-exists', '--no-owner', db],
-    { cwd: ROOT, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, windowsHide: true, env: { ...process.env, PGPASSWORD: password } });
-  if (r.status !== 0 || !r.stdout || r.stdout.length < 100) {
+  const r = await run(pgDump, ['-h', host, '-p', port, '-U', user, '--clean', '--if-exists', '--no-owner', db],
+    { env: { ...process.env, PGPASSWORD: password }, stdoutFile: to });
+  const size = fs.existsSync(to) ? fs.statSync(to).size : 0;
+  if (r.status !== 0 || size < 100) {
     throw new Error(`Falha no pg_dump: ${(r.stderr || '').trim().slice(0, 300) || 'o PostgreSQL está ligado? (tools\\postgres.bat start)'}`);
   }
-  fs.writeFileSync(to, r.stdout, 'utf8');
-  return r.stdout.length;
+  return size;
 }
 
 function copyIfExists(from: string, to: string) {
@@ -68,23 +83,25 @@ function copyIfExists(from: string, to: string) {
   return true;
 }
 
-function copySource(to: string) {
+async function copySource(to: string) {
   fs.mkdirSync(to, { recursive: true });
   // robocopy: código sem dependências, builds, logs, backups e a própria sessão do WhatsApp (vai à parte).
-  const r = run('robocopy', [ROOT, to, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NC', '/NS', '/NP',
+  const r = await run('robocopy', [ROOT, to, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NC', '/NS', '/NP',
     '/XD', 'node_modules', 'dist', 'logs', 'backups', '.git', '.wa-auth', 'generated',
-    '/XF', '*.log', '*.zip']);
+    '/XF', '*.log', '*.zip', '.db-secret', '.db-secret.novo']); // a senha criptografada só abre neste PC: não vai junto
   // robocopy devolve códigos < 8 em sucesso.
   if ((r.status ?? 0) >= 8) throw new Error(`Falha ao copiar o código: ${(r.stderr || r.stdout || '').trim().slice(0, 300)}`);
 }
 
-function zipFolder(folder: string, zipPath: string) {
+async function zipFolder(folder: string, zipPath: string) {
   // tar (bsdtar, nativo do Windows 10+) gera .zip e lê arquivos que o antivírus ainda está
   // inspecionando; o Compress-Archive falha com "usado por outro processo" nesses casos.
-  let r = run('tar', ['-a', '-c', '-f', zipPath, '-C', folder, '.']);
+  // Caminho completo: com o Git instalado, "tar" no PATH pode ser o GNU tar, que não gera .zip.
+  const winTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+  let r = await run(fs.existsSync(winTar) ? winTar : 'tar', ['-a', '-c', '-f', zipPath, '-C', folder, '.']);
   if (r.status !== 0 || !fs.existsSync(zipPath)) {
     const ps = `Compress-Archive -Path '${folder.replace(/'/g, "''")}\\*' -DestinationPath '${zipPath.replace(/'/g, "''")}' -CompressionLevel Optimal -Force`;
-    r = run('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps]);
+    r = await run('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps]);
   }
   if (r.status !== 0 || !fs.existsSync(zipPath)) throw new Error(`Falha ao compactar: ${(r.stderr || '').trim().slice(0, 300)}`);
 }
@@ -98,16 +115,20 @@ export async function createBackup(kind: 'manual' | 'auto' = 'manual'): Promise<
   const zipPath = path.join(BACKUP_DIR, name);
   const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'ofertasdahora-bkp-'));
   try {
-    const dbBytes = dumpDatabase(path.join(staging, 'db.sql'));
+    const dbBytes = await dumpDatabase(path.join(staging, 'db.sql'));
     copyIfExists(path.join(ROOT, 'apps', 'api', '.env'), path.join(staging, 'config', 'api.env'));
     copyIfExists(path.join(ROOT, 'apps', 'web', '.env'), path.join(staging, 'config', 'web.env'));
     const wa = copyIfExists(path.join(ROOT, 'apps', 'api', '.wa-auth'), path.join(staging, 'wa-auth'));
-    copySource(path.join(staging, 'source'));
+    await copySource(path.join(staging, 'source'));
     fs.writeFileSync(path.join(staging, 'manifest.json'), JSON.stringify({
       app: 'Robô das Ofertas', createdAt: now.toISOString(), kind, host: os.hostname(), dbBytes, whatsappSession: wa,
       restore: 'Arraste este .zip sobre o OfertasDaHora.bat (na raiz do projeto) ou use a opção Restaurar do menu. Em outra máquina: extraia source/ para uma pasta e faça o mesmo com o OfertasDaHora.bat de lá.'
     }, null, 2));
-    zipFolder(staging, zipPath);
+    await zipFolder(staging, zipPath);
+  } catch (e) {
+    // Zip pela metade não pode ficar: contaria como "o automático mais recente" por 5 dias.
+    fs.rmSync(zipPath, { force: true });
+    throw e;
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });
   }

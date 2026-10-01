@@ -61,7 +61,18 @@ export async function refreshMercadoLivreToken(refreshToken: string) {
  * Token de acesso pronto para uso: se estiver vencido (ou a menos de 2 min de vencer),
  * renova na hora com o refresh_token e grava. Assim a busca não depende do worker estar vivo.
  */
-export async function getMercadoLivreAccessToken(userId: string): Promise<string> {
+// O refresh_token do ML vale uma vez só. A busca roda vários termos em paralelo: sem isso, cada um
+// tentava renovar com o mesmo refresh_token, um conseguia e os outros davam "reconecte a conta".
+const inFlight = new Map<string, Promise<string>>();
+export function getMercadoLivreAccessToken(userId: string): Promise<string> {
+  const cur = inFlight.get(userId);
+  if (cur) return cur;
+  const p = accessTokenNow(userId).finally(() => inFlight.delete(userId));
+  inFlight.set(userId, p);
+  return p;
+}
+
+async function accessTokenNow(userId: string): Promise<string> {
   const acc = await prisma.affiliateAccount.findUnique({ where: { userId_marketplace: { userId, marketplace: 'MERCADO_LIVRE' } } });
   if (!acc?.accessToken) throw new Error('Mercado Livre não conectado: clique em "Conectar" no card do Mercado Livre em Configurações.');
   let access: string; let refresh: string | undefined;

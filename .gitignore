@@ -12,3 +12,5 @@ tools/cloudflared.log
 apps/api/ml-redirect.txt
 tsconfig.tsbuildinfo
 apps/api/.cache/
+apps/api/.db-secret
+apps/api/.db-secret.novo

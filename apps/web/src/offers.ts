@@ -1,4 +1,6 @@
-export type Marketplace = 'SHOPEE' | 'MERCADO_LIVRE' | 'AMAZON' | 'OUTRO';
+import { parseBr } from './money';
+
+export type Marketplace ='SHOPEE' | 'MERCADO_LIVRE' | 'AMAZON' | 'OUTRO';
 
 export type ParsedOffer = {
   id: string;
@@ -21,18 +23,16 @@ const RE_DE_POR = /\bde\s*R?\$?\s*([\d.,]+)\s*(?:por|para|→|->)\s*R?\$?\s*([\d
 const RE_CUPOM = /\b(?:cupom|cupon|c[óo]digo|coupon|use)\s*(?:de\s*desconto\s*)?[:\-–]?\s*([A-Z0-9][A-Z0-9._-]{2,24})\b/i;
 const RE_PERCENT = /(\d{1,3})\s*%\s*(?:off|de\s*desconto)?/i;
 
-/** "1.234,56" e "1234.56" viram 1234.56. */
+/** "1.234,56", "1234.56" e "R$ 2.999" (ponto de milhar sem centavos) — mesma regra do parseBr. */
 export function parseMoney(raw: string): number | undefined {
-  const t = raw.replace(/[^\d.,]/g, '');
-  if (!t) return undefined;
-  const n = Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t);
-  return Number.isFinite(n) ? n : undefined;
+  return parseBr(raw);
 }
 
 function marketplaceOf(url: string): Marketplace {
-  if (/shopee\.|shope\.ee/i.test(url)) return 'SHOPEE';
-  if (/mercadoliv|mercadolibre|mlb|\bmeli\b/i.test(url)) return 'MERCADO_LIVRE';
+  // Amazon antes do ML: um ASIN como B0MLBXYZ12 tem "mlb" e caía no Mercado Livre.
   if (/amazon\.com|amzn\.to|amzn\.com|\/\/a\.co\//i.test(url)) return 'AMAZON';
+  if (/shopee\.|shope\.ee/i.test(url)) return 'SHOPEE';
+  if (/mercadoliv|mercadolibre|\bmeli\b|\/MLB-?\d/i.test(url)) return 'MERCADO_LIVRE';
   return 'OUTRO';
 }
 
@@ -175,10 +175,8 @@ export function toAffiliateUrl(url: string, suffix?: string): string {
   if (!s) return url;
   try {
     const u = new URL(url);
-    for (const pair of s.split('&')) {
-      const [k, ...rest] = pair.split('=');
-      if (k) u.searchParams.set(k, rest.join('='));
-    }
+    // URLSearchParams decodifica o sufixo ("jo%C3%A3o") antes do set, que codifica de novo: sem isso saía "jo%25C3%25A3o".
+    for (const [k, v] of new URLSearchParams(s)) u.searchParams.set(k, v);
     return u.toString();
   } catch {
     return url + (url.includes('?') ? '&' : '?') + s;

@@ -68,6 +68,8 @@ export default function Capture() {
     setBusy(true); setMsg('');
     let ok = 0; const fails: string[] = []; const ids: string[] = []; const doneNow: Record<string, boolean> = {};
     for (const o of selected) {
+      // Link de outra loja (Magalu, AliExpress...) ia salvo como Shopee e sem a sua comissão.
+      if (o.marketplace === 'OUTRO') { fails.push(`${o.title.slice(0, 30)}: loja não suportada (só Shopee, Mercado Livre e Amazon)`); continue; }
       try {
         // Amazon: a API abre o link curto (amzn.to) e troca a tag de quem postou pela sua.
         const r = o.marketplace === 'AMAZON' ? await api.post('/api/products/import/amazon', {

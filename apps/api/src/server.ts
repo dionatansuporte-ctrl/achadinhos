@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import https from 'node:https';
 import selfsigned from 'selfsigned';
+import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { prisma } from './db';
 import { getSecret, describeSecret, saveSecrets, SETTING_KEYS } from './services/settings';
@@ -49,6 +50,10 @@ const brNumber = z.preprocess(v => {
   const n = Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : onlyDotDecimal ? t : t.replace(/\./g, ''));
   return Number.isFinite(n) ? n : undefined;
 }, z.number().optional());
+
+// Link só http(s). O httpUrl() sozinho aceita "C:/arquivo" (o WhatsApp leria o arquivo do PC e
+// mandaria como foto), "file:" e "javascript:" (link que roda código ao ser clicado).
+const httpUrl = () => z.string().url().refine(u => /^https?:\/\//i.test(u), 'Use um link que comece com http:// ou https://.');
 
 const asyncRoute = (fn: any) => (req: any, res: any, next: any) => Promise.resolve(fn(req,res,next)).catch(next);
 const hash = (v: string) => crypto.createHash('sha256').update(v).digest('hex');
@@ -120,6 +125,12 @@ app.delete('/api/users/:id', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(target.id===req.user.id) return res.status(400).json({error:'Você não pode excluir a própria conta.'});
   if(target.role==='MASTER') return res.status(403).json({error:'O usuário MASTER não pode ser excluído.'});
   await prisma.user.delete({where:{id:target.id}});
+  res.json({ok:true});
+}));
+
+app.post('/api/auth/logout', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const token=String(req.headers.authorization||'').slice(7);
+  const sid=(jwt.decode(token) as any)?.sid; if(typeof sid==='string') await prisma.session.deleteMany({where:{tokenHash:sid}});
   res.json({ok:true});
 }));
 
@@ -201,6 +212,7 @@ app.post('/api/lists', requireAuth, asyncRoute(async(req:any,res:any)=>{
 app.post('/api/lists/:id/products', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const body=z.object({productId:z.string()}).parse(req.body);
   const list=await prisma.productList.findFirst({where:{id:req.params.id,userId:req.user.id}}); if(!list)return res.status(404).json({error:'Lista não encontrada.'});
+  if(!(await prisma.product.findFirst({where:{id:body.productId,account:{userId:req.user.id}}}))) return res.status(404).json({error:'Produto não encontrado.'});
   res.status(201).json(await prisma.listProduct.create({data:{listId:list.id,productId:body.productId}}));
 }));
 
@@ -256,7 +268,7 @@ app.post('/api/products/bulk-delete', requireAuth, asyncRoute(async(req:any,res:
   res.json({deleted:r.count});
 }));
 app.post('/api/products/import/manual', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({marketplace:z.enum(MARKETPLACE_LIST),title:z.string().min(2),productUrl:z.string().url(),affiliateUrl:z.string().url(),imageUrl:z.string().url().optional(),price:brNumber,oldPrice:brNumber,discountPercent:z.coerce.number().int().optional(),couponText:z.string().optional(),videoUrl:z.string().url().optional()}).parse(req.body);
+  const body=z.object({marketplace:z.enum(MARKETPLACE_LIST),title:z.string().min(2),productUrl:httpUrl(),affiliateUrl:httpUrl(),imageUrl:httpUrl().optional(),price:brNumber,oldPrice:brNumber,discountPercent:z.coerce.number().int().optional(),couponText:z.string().optional(),videoUrl:httpUrl().optional()}).parse(req.body);
   // Cadastro manual não passa por OAuth: o link de afiliado já vem pronto do painel do
   // marketplace. A conta local existe só para agrupar os produtos do usuário.
   const account=await prisma.affiliateAccount.upsert({
@@ -268,7 +280,7 @@ app.post('/api/products/import/manual', requireAuth, asyncRoute(async(req:any,re
 }));
 
 app.post('/api/products/import/mercadolivre', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({url:z.string().url(),affiliateUrl:z.string().url()}).parse(req.body);
+  const body=z.object({url:httpUrl(),affiliateUrl:httpUrl()}).parse(req.body);
   const id=extractMercadoLivreItemId(body.url); if(!id)return res.status(400).json({error:'Não foi possível identificar o ID MLB da URL.'});
   const account=await prisma.affiliateAccount.findUnique({where:{userId_marketplace:{userId:req.user.id,marketplace:'MERCADO_LIVRE'}}});
   if(!account)return res.status(400).json({error:'Conta Mercado Livre não configurada.'});
@@ -282,7 +294,7 @@ app.post('/api/products/import/mercadolivre', requireAuth, asyncRoute(async(req:
 // Link da Amazon (inteiro ou amzn.to): troca o rastreio pela tag do usuário. Com a Creators API liberada,
 // nome, foto e preço vêm da Amazon; sem ela, valem os dados digitados na tela.
 app.post('/api/products/import/amazon', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({url:z.string().url(),title:z.string().trim().optional(),imageUrl:z.string().url().optional(),price:brNumber,oldPrice:brNumber,couponText:z.string().optional()}).parse(req.body);
+  const body=z.object({url:httpUrl(),title:z.string().trim().optional(),imageUrl:httpUrl().optional(),price:brNumber,oldPrice:brNumber,couponText:z.string().optional()}).parse(req.body);
   if(!isAmazonUrl(body.url)) return res.status(400).json({error:'Esse link não é da Amazon.'});
   const tag=await amazonTag(); if(!tag) return res.status(400).json({error:'Salve sua tag de associado da Amazon (ex.: seunome-20) em Configurações antes de importar.'});
   const url=await expandAmazonUrl(body.url); const asin=extractAsin(url);
@@ -388,8 +400,10 @@ app.post('/api/shopee/search', requireAuth, asyncRoute(async(req:any,res:any)=>{
 }));
 
 app.post('/api/promotions/queue', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({automationId:z.string(),productId:z.string().optional(),channelId:z.string(),scheduledAt:z.coerce.date(),payload:z.object({title:z.string(),text:z.string(),affiliateUrl:z.string().url(),imageUrl:z.string().url().optional()})}).parse(req.body);
+  const body=z.object({automationId:z.string(),productId:z.string().optional(),channelId:z.string(),scheduledAt:z.coerce.date(),payload:z.object({title:z.string(),text:z.string(),affiliateUrl:httpUrl(),imageUrl:httpUrl().optional()})}).parse(req.body);
   const owned=await prisma.automation.findFirst({where:{id:body.automationId,userId:req.user.id}}); if(!owned)return res.status(404).json({error:'Automação inválida.'});
+  if(!(await prisma.channel.findFirst({where:{id:body.channelId,userId:req.user.id}}))) return res.status(404).json({error:'Canal inválido.'});
+  if(body.productId && !(await prisma.product.findFirst({where:{id:body.productId,account:{userId:req.user.id}}}))) return res.status(404).json({error:'Produto inválido.'});
   const job=await prisma.promotionJob.create({data:{automationId:body.automationId,productId:body.productId,channelId:body.channelId,scheduledAt:body.scheduledAt,payloadJson:body.payload}});
   res.status(201).json(job); // a linha PENDING com scheduledAt já é a fila: o worker pega quando vencer
 }));
@@ -507,15 +521,16 @@ app.post('/api/coupons/send/:marketplace', requireAuth, asyncRoute(async(req:any
 }));
 
 // ---------- WhatsApp Web (grupos) ----------
-app.get('/api/whatsapp/status', requireAuth, (_req:any,res:any)=>res.json({...getWaState(),hasSession:hasSavedSession()}));
+app.get('/api/whatsapp/status', requireAuth, (req:any,res:any)=>{ const st=getWaState(); res.json({...st,qr:canManageUsers(req.user)?st.qr:null,hasSession:hasSavedSession()}); });
 
-app.post('/api/whatsapp/connect', requireAuth, asyncRoute(async(_req:any,res:any)=>{
+app.post('/api/whatsapp/connect', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
   connectWhatsAppWeb().catch(()=>{});
   // O QR leva ~1-3s para chegar; a tela consulta /status até aparecer.
   res.json(getWaState());
 }));
 
-app.post('/api/whatsapp/logout', requireAuth, asyncRoute(async(_req:any,res:any)=>{ await logoutWhatsAppWeb(); res.json({ok:true}); }));
+app.post('/api/whatsapp/logout', requireAuth, asyncRoute(async(req:any,res:any)=>{ if(!requireAdmin(req,res))return; await logoutWhatsAppWeb(); res.json({ok:true}); }));
 
 app.get('/api/whatsapp/groups', requireAuth, asyncRoute(async(_req:any,res:any)=>{
   try{ res.json(await listGroups()); }catch(e:any){ res.status(409).json({error:e.message}); }
@@ -612,7 +627,7 @@ app.post('/api/customers/:id/send', requireAuth, asyncRoute(async(req:any,res:an
 // Usado pelo worker: a sessão do WhatsApp Web vive só neste processo.
 app.post('/internal/whatsapp/send', asyncRoute(async(req:any,res:any)=>{
   if(!process.env.JWT_SECRET || req.headers['x-internal-secret']!==process.env.JWT_SECRET) return res.status(401).json({error:'Não autorizado.'});
-  const body=z.object({jid:z.string(),text:z.string(),imageUrl:z.string().url().optional(),jobId:z.string().optional()}).parse(req.body);
+  const body=z.object({jid:z.string(),text:z.string(),imageUrl:httpUrl().optional(),jobId:z.string().optional()}).parse(req.body);
   try{
     // Nova tentativa de um job já entregue (a resposta anterior ao worker se perdeu)? Não manda de novo.
     if(body.jobId){ const j=await prisma.promotionJob.findUnique({where:{id:body.jobId},select:{status:true}}); if(j?.status==='SENT') return res.json({ok:true,already:true}); }
@@ -684,7 +699,8 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
-app.listen(Number(process.env.PORT||3333),()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
+const HOST=process.env.HOST||'127.0.0.1';
+app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).
@@ -697,5 +713,5 @@ try{
     fs.writeFileSync(keyFile,pems.private); fs.writeFileSync(certFile,pems.cert);
   }
   const httpsPort=Number(process.env.HTTPS_PORT||3443);
-  https.createServer({key:fs.readFileSync(keyFile),cert:fs.readFileSync(certFile)},app).listen(httpsPort,()=>console.log(`Robô das Ofertas API (HTTPS p/ OAuth) em https://localhost:${httpsPort}`));
+  https.createServer({key:fs.readFileSync(keyFile),cert:fs.readFileSync(certFile)},app).listen(httpsPort,HOST,()=>console.log(`Robô das Ofertas API (HTTPS p/ OAuth) em https://localhost:${httpsPort}`));
 }catch(e:any){ console.error('HTTPS local não iniciado:',e.message); }

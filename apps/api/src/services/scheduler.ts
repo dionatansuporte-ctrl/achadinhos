@@ -45,16 +45,24 @@ export function describeSchedule(schedule: ScheduleJson | null | undefined): str
 }
 
 /** Backup automático a cada AUTO_EVERY_DAYS dias (o anterior é apagado), entre 03:00 e 05:59 (SP), quando o sistema está ocioso. */
+// Falhou? Tenta de novo só depois de 1 h (antes eram ~180 tentativas, uma por minuto, até as 6h).
+let backupRunning = false;
+let backupFailedAt = 0;
 async function autoBackup() {
   const m = minutesOfDay(new Date(), 'America/Sao_Paulo');
   if (m < 3 * 60 || m >= 6 * 60) return;
+  if (backupRunning || Date.now() - backupFailedAt < 60 * 60_000) return;
   if (!isAutoBackupDue()) return;
+  backupRunning = true;
   try {
     const b = await createBackup('auto');
     console.log(`[backup] automático criado: ${b.file} (próximo em ${AUTO_EVERY_DAYS} dias)`);
   } catch (e: any) {
+    backupFailedAt = Date.now();
     console.error('[backup] automático falhou:', e.message);
     await prisma.automationLog.create({ data: { action: 'BACKUP', status: 'ERROR', message: e.message } }).catch(() => {});
+  } finally {
+    backupRunning = false;
   }
 }
 
@@ -62,7 +70,8 @@ async function tick() {
   if (running) return;
   running = true;
   try {
-    await autoBackup();
+    // Em paralelo: o backup leva minutos e não pode segurar as automações e os cupons.
+    autoBackup().catch(() => {});
     const now = new Date();
     await tickCoupons(now).catch(e => console.error('[cupons] falha no tick:', e.message));
     const list = await prisma.automation.findMany({ where: { status: 'ACTIVE' } });
@@ -70,7 +79,10 @@ async function tick() {
       const s = (a.scheduleJson || {}) as ScheduleJson;
       const every = Number(s.everyMinutes);
       if (!every || every <= 0) continue;
-      if (!inWindow(minutesOfDay(now, a.timezone || 'America/Sao_Paulo'), s.startTime, s.endTime)) continue;
+      // Fuso inválido salvo numa automação não pode parar as outras (minutesOfDay lança RangeError).
+      let minutes: number;
+      try { minutes = minutesOfDay(now, a.timezone || 'America/Sao_Paulo'); } catch { minutes = minutesOfDay(now, 'America/Sao_Paulo'); }
+      if (!inWindow(minutes, s.startTime, s.endTime)) continue;
 
       const last = await prisma.automationLog.findFirst({ where: { automationId: a.id, action: 'RUN' }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
       // Tolerância de 30s para o tick de 1 min não "perder" o intervalo.
