@@ -84,8 +84,6 @@ export function defaultOfferTemplate() {
     "🏷️ *{{discountPercent}} DE DESCONTO*",
     "🎟️ *Cupom: {{coupon}}*",
     "",
-    "⚡ *Aproveite enquanto durar o estoque!*",
-    "",
     "🛒 *COMPRAR AGORA:*",
     "{{affiliateUrl}}",
     "",

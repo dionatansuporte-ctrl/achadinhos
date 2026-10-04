@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, LogOut, MessageCircle, Plus, RefreshCw, Smartphone } from 'lucide-react';
 import { api } from './api';
+import GroupContacts from './GroupContacts';
 
 type State = { status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; error?: string | null; hasSession?: boolean };
 type Group = { id: string; name: string; participants: number };
@@ -115,6 +116,7 @@ export default function WhatsAppWeb({ onChanged }: { onChanged: () => void }) {
                 <button className="outline" onClick={() => setPicked(Object.fromEntries(shown.map(g => [g.id, true])))}>Marcar todos</button>
                 <button className="outline" onClick={() => setPicked({})}>Desmarcar</button>
               </div>
+              <GroupContacts groups={groups} />
             </>
           ) : <p className="muted" style={{ marginTop: 14 }}>Carregando grupos...</p>}
         </>

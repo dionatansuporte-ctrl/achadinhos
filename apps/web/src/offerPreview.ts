@@ -20,8 +20,6 @@ export const DEFAULT_TEMPLATE = [
   '🏷️ *{{discountPercent}} DE DESCONTO*',
   '🎟️ *Cupom: {{coupon}}*',
   '',
-  '⚡ *Aproveite enquanto durar o estoque!*',
-  '',
   '🛒 *COMPRAR AGORA:*',
   '{{affiliateUrl}}',
   '',

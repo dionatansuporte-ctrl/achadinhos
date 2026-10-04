@@ -195,3 +195,44 @@ export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: 
   }
   return sock.sendMessage(to, { text });
 }
+
+export type WaMember = { jid: string; phone: string | null; admin: boolean };
+
+/** Membros de um grupo. Em grupos "anônimos" (@lid) o WhatsApp pode não informar o telefone. */
+export async function listGroupMembers(groupId: string): Promise<{ name: string; members: WaMember[] }> {
+  if (!sock || status !== 'connected') throw new Error('WhatsApp não conectado. Escaneie o QR code em Canais.');
+  const meta = await sock.groupMetadata(groupId);
+  const myPhone = me?.id || '';
+  const members = meta.participants
+    .map(p => {
+      const pn = p.jid && p.jid.endsWith('@s.whatsapp.net') ? p.jid : p.id.endsWith('@s.whatsapp.net') ? p.id : '';
+      const phone = pn ? pn.split('@')[0].split(':')[0] : null;
+      return { jid: pn || p.id, phone, admin: !!p.admin };
+    })
+    .filter(m => m.phone !== myPhone);
+  return { name: meta.subject || groupId, members };
+}
+
+/** Link de convite do grupo (é preciso ser administrador dele). */
+export async function groupInviteLink(groupId: string): Promise<string> {
+  if (!sock || status !== 'connected') throw new Error('WhatsApp não conectado. Escaneie o QR code em Canais.');
+  const code = await sock.groupInviteCode(groupId);
+  if (!code) throw new Error('O WhatsApp não devolveu o link de convite deste grupo.');
+  return `https://chat.whatsapp.com/${code}`;
+}
+
+/** Resultado de adicionar um contato: ok, já estava, privacidade (só entra por convite) ou outro erro. */
+export type WaAddResult = { jid: string; result: 'added' | 'already' | 'privacy' | 'failed' };
+
+/** Adiciona contatos a um grupo (é preciso ser administrador dele). */
+export async function addGroupMembers(groupId: string, jids: string[]): Promise<WaAddResult[]> {
+  if (!sock || status !== 'connected') throw new Error('WhatsApp não conectado. Escaneie o QR code em Canais.');
+  const res = await sock.groupParticipantsUpdate(groupId, jids, 'add');
+  return jids.map(jid => {
+    const r = res.find(x => x.jid === jid);
+    const code = String(r?.status || '');
+    // 200 = entrou; 409 = já é membro; 403 = a privacidade do contato não deixa adicionar (precisa de convite).
+    const result = code === '200' ? 'added' : code === '409' ? 'already' : code === '403' ? 'privacy' : 'failed';
+    return { jid, result };
+  });
+}

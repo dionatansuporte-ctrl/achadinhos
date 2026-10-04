@@ -1,6 +1,6 @@
 import { prisma } from '../db';
 import { runAutomation, type ScheduleJson } from './automation-runner';
-import { createBackup, isAutoBackupDue, AUTO_EVERY_DAYS } from './backup';
+import { createBackup, isAutoBackupDue } from './backup';
 import { cleanupDatabase, isCleanupDue, CLEANUP_EVERY_DAYS } from './cleanup';
 import { tickCoupons } from './coupons';
 
@@ -61,7 +61,7 @@ async function autoCleanup() {
   }
 }
 
-/** Backup automático a cada AUTO_EVERY_DAYS dias (o anterior é apagado), entre 03:00 e 05:59 (SP), quando o sistema está ocioso. */
+/** Backup automático todo dia (ficam os dos últimos 3 dias), entre 03:00 e 05:59 (SP), quando o sistema está ocioso. */
 // Falhou? Tenta de novo só depois de 1 h (antes eram ~180 tentativas, uma por minuto, até as 6h).
 let backupRunning = false;
 let backupFailedAt = 0;
@@ -74,7 +74,7 @@ async function autoBackup() {
   backupRunning = true;
   try {
     const b = await createBackup('auto');
-    console.log(`[backup] automático criado: ${b.file} (próximo em ${AUTO_EVERY_DAYS} dias)`);
+    console.log(`[backup] automático criado: ${b.file} (próximo amanhã)`);
   } catch (e: any) {
     backupFailedAt = Date.now();
     console.error('[backup] automático falhou:', e.message);

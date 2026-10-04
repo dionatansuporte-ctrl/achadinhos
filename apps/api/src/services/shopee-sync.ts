@@ -4,6 +4,8 @@ import { searchShopeeBest, type ShopeeOffer, type ShopeeSort } from '../integrat
 import { searchMercadoLivreOffers } from '../integrations/mercadolivre-search';
 import { searchAmazonOffers } from '../integrations/amazon';
 import { isMarketplace, marketplaceLabel, type SearchMarketplace } from './marketplaces';
+import { DERIVED_SORTS, rankBuyers, rankDeals } from './offer-rank';
+import { filterByTerm, kidThemed } from './term-filter';
 
 export { marketplaceLabel, type SearchMarketplace };
 
@@ -23,6 +25,8 @@ export type ShopeeSearchRule = {
   limit?: number;
   minDiscount?: number;           // repassado ao ML para filtrar já na API
   keywordCursor?: number;         // nº da rodada (o robô informa): escolhe o bloco de termos do rodízio
+  shopeeExclude?: number[];       // categorias de nível 1 da Shopee que a automação não envia (marcadas no "Testar busca")
+  termFilter?: boolean;          // false = não filtra o resultado pelo assunto do termo (o atendimento ao cliente tem o seu)
 };
 
 /** Quantos termos entram por rodada: ~3 produtos por termo, no mínimo 3 termos. */
@@ -51,7 +55,7 @@ export function ruleKeywords(rule: ShopeeSearchRule): string[] {
   return [...new Set(all.map(k => k.toLowerCase()))].map(lower => all.find(k => k.toLowerCase() === lower)!);
 }
 
-const SORTS = ['TRENDING', 'SALES', 'COMMISSION', 'RELEVANCE', 'BOTH'];
+const SORTS = ['TRENDING', 'SALES', 'COMMISSION', 'RELEVANCE', 'BOTH', ...DERIVED_SORTS];
 /** Critérios de ordenação da regra: `sorts` novo ou `sort` legado; padrão "mais procurados". */
 export function ruleSorts(rule: ShopeeSearchRule): string[] {
   const list = (Array.isArray(rule.sorts) ? rule.sorts : []).map(String).filter(s => SORTS.includes(s));
@@ -127,11 +131,31 @@ async function searchOneSort(userId: string, rule: ShopeeSearchRule, keyword: st
  * e de maior comissão fica na frente. Um critério que falhar não derruba os outros.
  */
 async function searchOne(userId: string, rule: ShopeeSearchRule, keyword: string | undefined, limit: number, page: number): Promise<ShopeeOffer[]> {
-  const sorts = [...new Set(ruleSorts(rule).map(s => rule.marketplace === 'AMAZON' ? (s === 'RELEVANCE' ? 'RELEVANCE' : 'SALES')
+  const all = [...new Set(ruleSorts(rule).map(s => DERIVED_SORTS.includes(s) ? s : rule.marketplace === 'AMAZON' ? (s === 'RELEVANCE' ? 'RELEVANCE' : 'SALES')
     : rule.marketplace === 'MERCADO_LIVRE' && (s === 'COMMISSION' || s === 'BOTH') ? 'SALES' : s))];
-  if (sorts.length === 1) return searchOneSort(userId, rule, keyword, sorts[0], limit, page);
-  const lists = await Promise.all(sorts.map(s => searchOneSort(userId, rule, keyword, s, limit, page).catch(() => [] as ShopeeOffer[])));
-  if (lists.every(l => !l.length)) await searchOneSort(userId, rule, keyword, sorts[0], limit, page); // devolve o erro real
+  const derived = all.filter(s => DERIVED_SORTS.includes(s));
+  // "Melhores ofertas" e "o que meus clientes compram" reordenam uma busca normal; sozinhos, partem dos mais vendidos.
+  const sorts = all.filter(s => !DERIVED_SORTS.includes(s));
+  if (!sorts.length) sorts.push('SALES');
+  // Automação: descarta o que não é do assunto do termo (ver term-filter.ts). O atendimento ao cliente tem filtro próprio.
+  const strict = rule.termFilter !== false && !!keyword;
+  const kidOk = kidThemed(ruleKeywords(rule));
+  const exclude = new Set((rule.marketplace === 'SHOPEE' || !rule.marketplace) && Array.isArray(rule.shopeeExclude) ? rule.shopeeExclude.map(Number) : []);
+  const clean = (l: ShopeeOffer[]) => {
+    const inCat = exclude.size ? l.filter(o => !exclude.has(o.categoryIds?.[0] as number)) : l;
+    return strict ? filterByTerm(keyword, inCat, kidOk) : inCat;
+  };
+  if (sorts.length === 1 && !derived.length && !strict && !exclude.size) return searchOneSort(userId, rule, keyword, sorts[0], limit, page);
+  // Com reordenação ou filtro, busca o dobro para ter de onde escolher.
+  const fetchLimit = derived.length || strict || exclude.size ? Math.min(50, limit * 2) : limit;
+  const raw = await Promise.all(sorts.map(s => searchOneSort(userId, rule, keyword, s, fetchLimit, page).catch(() => [] as ShopeeOffer[])));
+  if (raw.every(l => !l.length)) await searchOneSort(userId, rule, keyword, sorts[0], fetchLimit, page); // devolve o erro real
+  const lists = raw.map(clean);
+  if (derived.length) {
+    const seen = new Set<string>();
+    const pool = lists.flat().filter(o => !seen.has(o.itemId) && seen.add(o.itemId));
+    for (const d of derived) lists.push(d === 'DEALS' ? rankDeals(pool) : await rankBuyers(userId, pool).catch(() => pool));
+  }
   const score = new Map<string, { offer: ShopeeOffer; score: number }>();
   for (const list of lists) list.forEach((o, i) => {
     const pts = list.length - i;

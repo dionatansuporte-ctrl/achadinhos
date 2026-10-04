@@ -39,6 +39,7 @@ export type ShopeeOffer = {
   productUrl: string;
   affiliateUrl: string;
   marketplace?: 'SHOPEE' | 'MERCADO_LIVRE' | 'AMAZON'; // preenchido pela busca (útil quando a regra mistura lojas)
+  categoryIds?: number[];   // Shopee: categoria de nível 1, 2 e 3 (a automação pode recusar categorias de nível 1)
 };
 
 async function credentials() {
@@ -76,7 +77,7 @@ query Ofertas($keyword: String, $productCatId: Int, $sortType: Int, $page: Int, 
   productOfferV2(keyword: $keyword, productCatId: $productCatId, sortType: $sortType, page: $page, limit: $limit) {
     nodes {
       itemId productName imageUrl priceMin priceMax priceDiscountRate
-      commissionRate commission sales ratingStar shopName productLink offerLink
+      commissionRate commission sales ratingStar shopName productLink offerLink productCatIds
     }
     pageInfo { page limit hasNextPage }
   }
@@ -116,6 +117,7 @@ function normalize(n: any): ShopeeOffer | null {
     sales: num(n.sales),
     rating: num(n.ratingStar),
     shopName: n.shopName || undefined,
+    categoryIds: Array.isArray(n.productCatIds) ? n.productCatIds.map(Number).filter((x: number) => x > 0) : undefined,
     productUrl, affiliateUrl
   };
 }

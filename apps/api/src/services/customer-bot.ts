@@ -456,9 +456,10 @@ export async function sendOffersTo(bot: CustomerBot, customer: Customer, keyword
     // mais vendidos (quem aparece bem nos dois sobe); ML só tem mais vendidos da categoria; Amazon, relevância.
     const per = Math.min(25, Math.max(12, limit * 6));
     const errors: any[] = [];
-    const sortsFor = (m: SearchMarketplace) => m === 'SHOPEE' ? ['RELEVANCE', 'SALES'] : m === 'AMAZON' ? ['RELEVANCE'] : ['SALES'];
+    // DEALS: entre o que bate com o pedido, os de maior desconto (que vendem bem) vão primeiro.
+    const sortsFor = (m: SearchMarketplace) => m === 'SHOPEE' ? ['RELEVANCE', 'SALES', 'DEALS'] : m === 'AMAZON' ? ['RELEVANCE', 'DEALS'] : ['SALES', 'DEALS'];
     const lists = await Promise.all(marketplaces.map(m =>
-      searchOffers(customer.userId, { marketplaces: [m], keywords: [keyword], sorts: sortsFor(m), limit: per })
+      searchOffers(customer.userId, { marketplaces: [m], keywords: [keyword], sorts: sortsFor(m), limit: per, termFilter: false })
         .then(l => filterByRequest(l, keyword)).catch(e => { errors.push(e); return { offers: [] as ShopeeOffer[], level: 'none' as const }; })));
     if (errors.length === marketplaces.length) throw errors[0];
     // Tudo batendo em alguma loja vale mais que "parecido" na outra.

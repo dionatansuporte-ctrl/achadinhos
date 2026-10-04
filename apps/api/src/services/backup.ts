@@ -18,8 +18,9 @@ import { applyDbSecret } from '../db-secret';
 export const ROOT = path.resolve(__dirname, '..', '..', '..', '..'); // <root>/apps/api/src/services → <root>
 export const BACKUP_DIR = path.join(ROOT, 'backups');
 const KEEP = 15;
-/** Intervalo do backup automático, em dias. Ao gerar um novo, os automáticos anteriores são apagados. */
-export const AUTO_EVERY_DAYS = 5;
+/** Backup automático todo dia; ficam só os dos últimos AUTO_KEEP_DAYS dias (pedido do usuário em 2026-10-02). */
+export const AUTO_EVERY_DAYS = 1;
+export const AUTO_KEEP_DAYS = 3;
 
 export type BackupInfo = { file: string; size: number; createdAt: Date; kind: 'manual' | 'auto' };
 
@@ -126,7 +127,7 @@ export async function createBackup(kind: 'manual' | 'auto' = 'manual'): Promise<
     }, null, 2));
     await zipFolder(staging, zipPath);
   } catch (e) {
-    // Zip pela metade não pode ficar: contaria como "o automático mais recente" por 5 dias.
+    // Zip pela metade não pode ficar: contaria como "o automático de hoje" e o de verdade não sairia.
     fs.rmSync(zipPath, { force: true });
     throw e;
   } finally {
@@ -146,14 +147,16 @@ export function listBackups(): BackupInfo[] {
 }
 
 /**
- * Automáticos: fica só o mais recente (o antigo só sai depois que o novo ficou pronto).
+ * Automáticos: ficam os dos últimos AUTO_KEEP_DAYS dias (no máximo AUTO_KEEP_DAYS arquivos); o mais
+ * recente nunca é apagado, então se o backup falhar por dias seguidos ainda sobra o último bom.
  * Manuais: mantém os KEEP mais recentes; os dos últimos 30 dias nunca são apagados.
  */
 function prune() {
   const all = listBackups();
   const cutoff = Date.now() - 30 * 86_400_000;
   const remove = (b: BackupInfo) => { try { fs.unlinkSync(path.join(BACKUP_DIR, b.file)); } catch { /* ignora */ } };
-  all.filter(b => b.kind === 'auto').slice(1).forEach(remove);
+  const autoCutoff = Date.now() - AUTO_KEEP_DAYS * 86_400_000;
+  all.filter(b => b.kind === 'auto').forEach((b, i) => { if (i > 0 && (i >= AUTO_KEEP_DAYS || b.createdAt.getTime() < autoCutoff)) remove(b); });
   all.filter(b => b.kind === 'manual').slice(KEEP).forEach(b => { if (b.createdAt.getTime() <= cutoff) remove(b); });
 }
 

@@ -19,7 +19,7 @@ import { titleKey } from './services/title-key';
 import { salesReport, clearSalesCache } from './services/reports';
 import { createBackup, listBackups, backupPath, deleteBackup, BACKUP_DIR } from './services/backup';
 import { startScheduler, describeSchedule } from './services/scheduler';
-import { connectWhatsAppWeb, getWaState, hasSavedSession, listGroups, logoutWhatsAppWeb, sendWhatsAppWebText } from './integrations/whatsapp-web';
+import { addGroupMembers, connectWhatsAppWeb, getWaState, groupInviteLink, hasSavedSession, listGroupMembers, listGroups, logoutWhatsAppWeb, sendWhatsAppWebText } from './integrations/whatsapp-web';
 import { requireAuth } from './middleware/auth';
 import { hashPassword, verifyPassword, issueSession } from './services/auth';
 import { isMailConfigured, sendMail, sendPasswordResetCode } from './services/mailer';
@@ -394,7 +394,7 @@ app.get('/api/categories/search', requireAuth, asyncRoute(async(req:any,res:any)
   try{ res.json(await searchCategories(q.q)); }catch(e:any){ res.status(400).json({error:e.message}); }
 }));
 app.post('/api/shopee/search', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({marketplace:z.enum(MARKETPLACE_LIST).optional(),marketplaces:z.array(z.enum(MARKETPLACE_LIST)).max(3).optional(),keyword:z.string().optional(),keywords:z.array(z.string()).max(50).optional(),categoryId:z.union([z.string(),z.number()]).optional(),sort:z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING']).optional(),sorts:z.array(z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING'])).max(5).optional(),limit:z.coerce.number().int().min(1).max(50).optional(),minDiscount:z.coerce.number().int().min(0).max(99).optional()}).parse(req.body);
+  const body=z.object({marketplace:z.enum(MARKETPLACE_LIST).optional(),marketplaces:z.array(z.enum(MARKETPLACE_LIST)).max(3).optional(),keyword:z.string().optional(),keywords:z.array(z.string()).max(50).optional(),categoryId:z.union([z.string(),z.number()]).optional(),sort:z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING']).optional(),sorts:z.array(z.enum(['SALES','COMMISSION','RELEVANCE','BOTH','TRENDING','DEALS','BUYERS'])).max(7).optional(),limit:z.coerce.number().int().min(1).max(50).optional(),minDiscount:z.coerce.number().int().min(0).max(99).optional()}).parse(req.body);
   try{ res.json({offers:await searchOffers(req.user.id,{...body,categoryId:body.categoryId===''?undefined:body.categoryId})}); }
   catch(e:any){ res.status(400).json({error:e.message}); }
 }));
@@ -534,6 +534,105 @@ app.post('/api/whatsapp/logout', requireAuth, asyncRoute(async(req:any,res:any)=
 
 app.get('/api/whatsapp/groups', requireAuth, asyncRoute(async(_req:any,res:any)=>{
   try{ res.json(await listGroups()); }catch(e:any){ res.status(409).json({error:e.message}); }
+}));
+
+// Contatos de um grupo (para baixar em planilha).
+app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  try{ res.json(await listGroupMembers(String(req.params.id))); }catch(e:any){ res.status(409).json({error:e.message}); }
+}));
+
+// Importação de contatos de um grupo para outro. Roda em segundo plano, em lotes pequenos
+// e com pausa entre eles: adicionar muita gente de uma vez é o jeito mais rápido de o número ser bloqueado.
+type GroupInvite={total:number;sent:number;failed:string[];running:boolean;error:string|null};
+type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;batch:number;pauseSec:number;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
+let groupCopy:GroupCopy|null=null;
+app.get('/api/whatsapp/groups/copy', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json(groupCopy); });
+app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  // Quantas pessoas por vez e quanto esperar entre os lotes: quem importa escolhe (padrão 5 a cada 30s).
+  // A origem é outro grupo (from) ou uma lista de telefones vinda de planilha (phones).
+  const body=z.object({from:z.string().endsWith('@g.us').optional(),phones:z.array(z.string().regex(/^\d{10,15}$/)).min(1).max(5000).optional(),fileName:z.string().max(200).optional(),to:z.string().endsWith('@g.us'),batch:z.coerce.number().int().min(1).max(20).default(5),pauseSec:z.coerce.number().int().min(10).max(3600).default(30)}).parse(req.body);
+  if(!body.from&&!body.phones) return res.status(400).json({error:'Escolha o grupo de origem ou um arquivo com os telefones.'});
+  if(body.from===body.to) return res.status(400).json({error:'Escolha grupos diferentes.'});
+  if(groupCopy?.running) return res.status(409).json({error:'Já existe uma importação em andamento.'});
+  let srcName:string, srcPhones:string[], noPhone=0, dst;
+  try{
+    dst=await listGroupMembers(body.to);
+    if(body.from){
+      const src=await listGroupMembers(body.from);
+      // Contatos sem telefone (@lid, grupos com número oculto) não podem ser adicionados.
+      srcName=src.name; srcPhones=src.members.filter(m=>m.phone).map(m=>m.phone!); noPhone=src.members.length-srcPhones.length;
+    }else{ srcName=`arquivo ${body.fileName||'CSV'}`; srcPhones=[...new Set(body.phones!)]; }
+  }catch(e:any){ return res.status(409).json({error:e.message}); }
+  const inDest=new Set(dst.members.map(m=>m.phone||m.jid));
+  const todo=srcPhones.filter(p=>!inDest.has(p)).map(p=>`${p}@s.whatsapp.net`);
+  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,batch:body.batch,pauseSec:body.pauseSec,total:todo.length,done:0,added:0,already:srcPhones.length-todo.length,privacy:[],failed:[],noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
+  groupCopy=job;
+  (async()=>{
+    try{
+      for(let i=0;i<todo.length;i+=body.batch){
+        const batch=todo.slice(i,i+body.batch);
+        let results;
+        try{ results=await addGroupMembers(body.to,batch); }
+        catch(e:any){
+          // Sem ser administrador do destino não adianta continuar.
+          if(/not-authorized|forbidden/i.test(String(e?.message||e))) throw new Error(`Você precisa ser administrador do grupo "${dst.name}" para adicionar pessoas.`);
+          throw e;
+        }
+        for(const r of results){
+          const phone=r.jid.split('@')[0];
+          if(r.result==='added') job.added++;
+          else if(r.result==='already') job.already++;
+          else if(r.result==='privacy') job.privacy.push(phone);
+          else job.failed.push(phone);
+        }
+        job.done+=batch.length;
+        if(i+body.batch<todo.length) await new Promise(r=>setTimeout(r,body.pauseSec*1000));
+      }
+    }catch(e:any){ job.error=e?.message||String(e); }
+    finally{ job.running=false; job.finishedAt=new Date().toISOString(); }
+  })();
+  res.status(202).json(job);
+}));
+
+// Link de convite do grupo, para mandar a quem não pôde ser adicionado direto.
+app.get('/api/whatsapp/groups/:id/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  try{ res.json({link:await groupInviteLink(String(req.params.id))}); }
+  catch(e:any){ res.status(409).json({error:/not-authorized|forbidden/i.test(String(e?.message||e))?'Você precisa ser administrador do grupo para pegar o link de convite.':e.message}); }
+}));
+
+// Manda o convite no privado de quem a privacidade não deixou adicionar na última importação.
+// Um de cada vez, com pausa sorteada entre 25 e 45s: mensagem em massa para quem não tem o número salvo chama atenção do WhatsApp.
+app.post('/api/whatsapp/groups/copy/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({text:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem precisa ter {link} no lugar do link do grupo.')}).parse(req.body);
+  const job=groupCopy;
+  if(!job||job.running) return res.status(409).json({error:'Espere a importação terminar para mandar os convites.'});
+  if(job.invite?.running) return res.status(409).json({error:'Os convites já estão sendo enviados.'});
+  if(!job.privacy.length) return res.status(400).json({error:'Ninguém ficou de fora por privacidade.'});
+  let link:string;
+  try{ link=await groupInviteLink(job.toId); }
+  catch(e:any){ return res.status(409).json({error:/not-authorized|forbidden/i.test(String(e?.message||e))?`Você precisa ser administrador do grupo "${job.toName}" para pegar o link de convite.`:e.message}); }
+  const text=body.text.replaceAll('{link}',link).replaceAll('{grupo}',job.toName);
+  const phones=[...job.privacy];
+  const inv:GroupInvite={total:phones.length,sent:0,failed:[],running:true,error:null};
+  job.invite=inv;
+  (async()=>{
+    try{
+      for(let i=0;i<phones.length;i++){
+        try{ await sendWhatsAppWebText(`${phones[i]}@s.whatsapp.net`,text); inv.sent++; }
+        catch(e:any){
+          if(/não conectado/i.test(String(e?.message||e))) throw e;
+          inv.failed.push(phones[i]);
+        }
+        if(i+1<phones.length) await new Promise(r=>setTimeout(r,25_000+Math.random()*20_000));
+      }
+    }catch(e:any){ inv.error=e?.message||String(e); }
+    finally{ inv.running=false; }
+  })();
+  res.status(202).json(job);
 }));
 
 // Cria canais a partir dos grupos escolhidos; ignora os que já existem.
