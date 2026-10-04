@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Download, FileUp, Link2, Send, UserPlus, Users } from 'lucide-react';
+import { Download, FileUp, Link2, Send, Square, UserPlus, Users } from 'lucide-react';
 import { api } from './api';
 
 type Group = { id: string; name: string; participants: number };
 type Invite = { total: number; sent: number; failed: string[]; running: boolean; error: string | null };
-type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; batch?: number; pauseSec?: number; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; noPhone: number; running: boolean; error: string | null; finishedAt: string | null };
+type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; noPhone: number; running: boolean; error: string | null; finishedAt: string | null };
 
 function downloadCsv(fileName: string, rows: string[][]) {
   // BOM para o Excel abrir os acentos certinho; ";" é o separador que o Excel em português espera.
@@ -29,6 +29,14 @@ function fmtTotal(people: number, batch: number, pauseSec: number) {
   if (min < 60) return `uns ${min} minuto(s)`;
   const h = Math.floor(min / 60), m = min % 60;
   return `umas ${h}h${m ? String(m).padStart(2, '0') : ''}`;
+}
+
+/** Igual ao fmtTotal, mas respeitando o limite por dia (o que passa do limite fica para os dias seguintes). */
+function fmtPlan(people: number, batch: number, pauseSec: number, limit: number, usedToday: number) {
+  const room = Math.max(0, limit - usedToday);
+  if (people <= room) return fmtTotal(people, batch, pauseSec);
+  const moreDays = Math.ceil((people - room) / limit);
+  return `${moreDays + (room ? 1 : 0)} dia(s), porque o limite é de ${limit} por dia: ${room ? `hoje entram ${room}, ` : 'hoje o limite já acabou, '}depois ${limit} por dia, e continua sozinho a cada virada do dia`;
 }
 
 /**
@@ -64,10 +72,13 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
   const [copy, setCopy] = useState<Copy | null>(null);
   const [batch, setBatch] = useState(5);
   const [pauseSec, setPauseSec] = useState(30);
+  const [dailyLimit, setDailyLimit] = useState(50);
+  const [addedToday, setAddedToday] = useState(0);
   const [inviteText, setInviteText] = useState(DEFAULT_INVITE);
   const [file, setFile] = useState<File | null>(null);
 
-  const loadCopy = () => api.get('/api/whatsapp/groups/copy').then(r => setCopy(r.data || null)).catch(() => {});
+  // Sem importação, a API devolve só a contagem do dia ({ none: true, addedToday }).
+  const loadCopy = () => api.get('/api/whatsapp/groups/copy').then(r => { setAddedToday(r.data?.addedToday || 0); setCopy(r.data && !r.data.none ? r.data : null); }).catch(() => {});
   useEffect(() => { loadCopy(); }, []);
   // Enquanto a importação ou os convites rodam, atualiza o progresso a cada 5s.
   const working = !!copy?.running || !!copy?.invite?.running;
@@ -90,6 +101,14 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
       try { await navigator.clipboard.writeText(link); setMsg(`Link copiado! É só colar na conversa com o cliente: ${link}`); }
       catch { setMsg(`Link do grupo: ${link}`); }
     } catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível pegar o link de convite.'); }
+    finally { setBusy(false); }
+  }
+
+  async function stopCopy() {
+    if (!confirm('Parar a importação? Quem já entrou continua no grupo.')) return;
+    setBusy(true);
+    try { const r = await api.post('/api/whatsapp/groups/copy/stop'); setCopy(r.data); }
+    catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível parar a importação.'); }
     finally { setBusy(false); }
   }
 
@@ -133,9 +152,10 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     if (from === to) return setMsg('Escolha grupos diferentes.');
     const src = groups.find(g => g.id === from), d = groups.find(g => g.id === to)?.name;
     const size = Math.min(20, Math.max(1, Math.round(batch) || 5));
-    if (!confirm(`Adicionar os membros de "${src?.name}" no grupo "${d}"?\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — com ${src?.participants || 0} membros, leva ${fmtTotal(src?.participants || 0, size, pauseSec)}.`)) return;
+    const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
+    if (!confirm(`Adicionar os membros de "${src?.name}" no grupo "${d}"?\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — com ${src?.participants || 0} membros, leva ${fmtPlan(src?.participants || 0, size, pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy', { from, to, batch: size, pauseSec }); setCopy(r.data); }
+    try { const r = await api.post('/api/whatsapp/groups/copy', { from, to, batch: size, pauseSec, dailyLimit: limit }); setCopy(r.data); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a importação.'); }
     finally { setBusy(false); }
   }
@@ -147,9 +167,10 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     if (!phones.length) return setMsg('Não achei nenhum telefone no arquivo. Coloque um número por linha, com DDD (ex.: 11 91234-5678).');
     const d = groups.find(g => g.id === to)?.name;
     const size = Math.min(20, Math.max(1, Math.round(batch) || 5));
-    if (!confirm(`Adicionar ${phones.length} telefone(s) do arquivo "${file.name}" no grupo "${d}"?${skipped ? `\n(${skipped} linha(s) sem telefone válido foram ignoradas.)` : ''}\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — leva ${fmtTotal(phones.length, size, pauseSec)}.`)) return;
+    const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
+    if (!confirm(`Adicionar ${phones.length} telefone(s) do arquivo "${file.name}" no grupo "${d}"?${skipped ? `\n(${skipped} linha(s) sem telefone válido foram ignoradas.)` : ''}\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — leva ${fmtPlan(phones.length, size, pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy', { phones, fileName: file.name, to, batch: size, pauseSec }); setCopy(r.data); }
+    try { const r = await api.post('/api/whatsapp/groups/copy', { phones, fileName: file.name, to, batch: size, pauseSec, dailyLimit: limit }); setCopy(r.data); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a importação.'); }
     finally { setBusy(false); }
   }
@@ -188,14 +209,23 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
             {PAUSES.map(s => <option key={s} value={s}>{fmtPause(s)}</option>)}
           </select>
         </label>
+        <label>Limite por dia
+          <input type="number" min={1} max={1000} value={dailyLimit} onChange={e => setDailyLimit(Number(e.target.value))} />
+        </label>
         <button className="outline" disabled={busy || !to} onClick={copyLink}><Link2 size={16} /> Copiar link do grupo</button>
       </div>
+      <p className="hint">Hoje já foram adicionadas {addedToday} pessoa(s) (soma todas as importações do dia). Quando o limite do dia acaba, a importação espera a meia-noite e continua sozinha — o sistema precisa ficar ligado.</p>
       <p className="hint">Só funciona se você for administrador do grupo de destino. Quem bloqueou ser adicionado por desconhecidos (privacidade) não entra direto — no fim da importação dá para mandar o link de convite no privado deles.</p>
 
       {copy && (
         <div className="inline-msg">
           <b>{copy.running ? 'Importando' : 'Importação'}: {copy.fromName} → {copy.toName}</b>
-          {copy.running && <div>{copy.done} de {copy.total} ({pct}%)…{copy.batch && copy.pauseSec ? ` ${copy.batch} pessoa(s) a cada ${fmtPause(copy.pauseSec)}, faltam ${fmtTotal(copy.total - copy.done, copy.batch, copy.pauseSec)}.` : ''}</div>}
+          {copy.running && <div>{copy.done} de {copy.total} ({pct}%)…{copy.batch && copy.pauseSec ? ` ${copy.batch} pessoa(s) a cada ${fmtPause(copy.pauseSec)}, faltam ${fmtPlan(copy.total - copy.done, copy.batch, copy.pauseSec, copy.dailyLimit || 1000, addedToday)}.` : ''}</div>}
+          {copy.running && copy.waitingUntil && <div>⏸️ Limite de {copy.dailyLimit} por dia atingido. Continua sozinha {new Date(copy.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })}.</div>}
+          {copy.running && (copy.stopped
+            ? <div>Parando… o lote que já estava saindo termina e mais ninguém é adicionado.</div>
+            : <button className="outline" style={{ marginTop: 8 }} disabled={busy} onClick={stopCopy}><Square size={16} /> Parar importação</button>)}
+          {!copy.running && copy.stopped && <div>Importação parada por você.</div>}
           <div>{copy.added} adicionado(s) · {copy.already} já estavam no grupo{copy.privacy.length ? ` · ${copy.privacy.length} bloqueados pela privacidade` : ''}{copy.failed.length ? ` · ${copy.failed.length} com erro` : ''}{copy.noPhone ? ` · ${copy.noPhone} com número oculto` : ''}</div>
           {copy.error && <div>Ops, a importação parou: {copy.error}</div>}
           {!copy.running && (copy.privacy.length + copy.failed.length) > 0 && (

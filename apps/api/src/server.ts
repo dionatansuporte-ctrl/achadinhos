@@ -545,14 +545,35 @@ app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:an
 // Importação de contatos de um grupo para outro. Roda em segundo plano, em lotes pequenos
 // e com pausa entre eles: adicionar muita gente de uma vez é o jeito mais rápido de o número ser bloqueado.
 type GroupInvite={total:number;sent:number;failed:string[];running:boolean;error:string|null};
-type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;batch:number;pauseSec:number;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
+type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
 let groupCopy:GroupCopy|null=null;
-app.get('/api/whatsapp/groups/copy', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json(groupCopy); });
+
+// Limite de pessoas adicionadas por dia (pedido do usuário em 2026-10-04). A contagem soma todas as
+// importações do dia e fica em disco, para valer mesmo se o sistema reiniciar. Tentativa conta
+// (mesmo quem não entrou por privacidade), porque o que o WhatsApp vigia é o pedido de adicionar.
+const ADD_COUNT_FILE=path.resolve(__dirname,'../.cache/group-adds.json');
+const spDay=(d=new Date())=>d.toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});
+function addsToday():number{
+  try{ const j=JSON.parse(fs.readFileSync(ADD_COUNT_FILE,'utf8')); return j.day===spDay()?Number(j.count)||0:0; }catch{ return 0; }
+}
+function countAdds(n:number){
+  try{ fs.mkdirSync(path.dirname(ADD_COUNT_FILE),{recursive:true}); fs.writeFileSync(ADD_COUNT_FILE,JSON.stringify({day:spDay(),count:addsToday()+n})); }catch{}
+}
+/** Meia-noite de amanhã no horário de Brasília (o Brasil não tem horário de verão desde 2019: UTC-3). */
+function nextSpMidnight(){ const [y,m,d]=spDay().split('-').map(Number); return new Date(Date.UTC(y,m-1,d+1,3,0,5)); }
+
+app.get('/api/whatsapp/groups/copy', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json(groupCopy?{...groupCopy,addedToday:addsToday()}:{addedToday:addsToday(),none:true}); });
+// Para a importação em andamento (o lote que está saindo termina; nada mais é adicionado).
+app.post('/api/whatsapp/groups/copy/stop', requireAuth, (req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  if(!groupCopy?.running) return res.status(409).json({error:'Não há importação em andamento.'});
+  groupCopy.stopped=true; res.json(groupCopy);
+});
 app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
   // Quantas pessoas por vez e quanto esperar entre os lotes: quem importa escolhe (padrão 5 a cada 30s).
   // A origem é outro grupo (from) ou uma lista de telefones vinda de planilha (phones).
-  const body=z.object({from:z.string().endsWith('@g.us').optional(),phones:z.array(z.string().regex(/^\d{10,15}$/)).min(1).max(5000).optional(),fileName:z.string().max(200).optional(),to:z.string().endsWith('@g.us'),batch:z.coerce.number().int().min(1).max(20).default(5),pauseSec:z.coerce.number().int().min(10).max(3600).default(30)}).parse(req.body);
+  const body=z.object({from:z.string().endsWith('@g.us').optional(),phones:z.array(z.string().regex(/^\d{10,15}$/)).min(1).max(5000).optional(),fileName:z.string().max(200).optional(),to:z.string().endsWith('@g.us'),batch:z.coerce.number().int().min(1).max(20).default(5),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50)}).parse(req.body);
   if(!body.from&&!body.phones) return res.status(400).json({error:'Escolha o grupo de origem ou um arquivo com os telefones.'});
   if(body.from===body.to) return res.status(400).json({error:'Escolha grupos diferentes.'});
   if(groupCopy?.running) return res.status(409).json({error:'Já existe uma importação em andamento.'});
@@ -567,12 +588,25 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   }catch(e:any){ return res.status(409).json({error:e.message}); }
   const inDest=new Set(dst.members.map(m=>m.phone||m.jid));
   const todo=srcPhones.filter(p=>!inDest.has(p)).map(p=>`${p}@s.whatsapp.net`);
-  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,batch:body.batch,pauseSec:body.pauseSec,total:todo.length,done:0,added:0,already:srcPhones.length-todo.length,privacy:[],failed:[],noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
+  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-todo.length,privacy:[],failed:[],noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
   groupCopy=job;
   (async()=>{
     try{
-      for(let i=0;i<todo.length;i+=body.batch){
-        const batch=todo.slice(i,i+body.batch);
+      // Espera em fatias de 30s para o "Parar" responder logo.
+      const wait=async(ms:number)=>{ const end=Date.now()+ms; while(!job.stopped&&Date.now()<end) await new Promise(r=>setTimeout(r,Math.min(30_000,end-Date.now()))); };
+      let i=0;
+      while(i<todo.length&&!job.stopped){
+        // Bateu o limite do dia: espera a virada do dia e continua sozinho.
+        let room=job.dailyLimit-addsToday();
+        if(room<=0){
+          job.waitingUntil=nextSpMidnight().toISOString();
+          await wait(new Date(job.waitingUntil).getTime()-Date.now());
+          job.waitingUntil=null;
+          continue;
+        }
+        const batch=todo.slice(i,i+Math.min(body.batch,room));
+        i+=batch.length;
+        countAdds(batch.length);
         let results;
         try{ results=await addGroupMembers(body.to,batch); }
         catch(e:any){
@@ -588,10 +622,10 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
           else job.failed.push(phone);
         }
         job.done+=batch.length;
-        if(i+body.batch<todo.length) await new Promise(r=>setTimeout(r,body.pauseSec*1000));
+        if(i<todo.length) await wait(body.pauseSec*1000);
       }
     }catch(e:any){ job.error=e?.message||String(e); }
-    finally{ job.running=false; job.finishedAt=new Date().toISOString(); }
+    finally{ job.running=false; job.waitingUntil=null; job.finishedAt=new Date().toISOString(); }
   })();
   res.status(202).json(job);
 }));
