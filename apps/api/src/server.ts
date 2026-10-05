@@ -545,7 +545,7 @@ app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:an
 // Importação de contatos de um grupo para outro. Roda em segundo plano, em lotes pequenos
 // e com pausa entre eles: adicionar muita gente de uma vez é o jeito mais rápido de o número ser bloqueado.
 type GroupInvite={total:number;sent:number;failed:string[];running:boolean;error:string|null};
-type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
+type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];failReasons:Record<string,string>;skippedBefore:number;noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
 let groupCopy:GroupCopy|null=null;
 
 // Limite de pessoas adicionadas por dia (pedido do usuário em 2026-10-04). A contagem soma todas as
@@ -559,6 +559,18 @@ function addsToday():number{
 function countAdds(n:number){
   try{ fs.mkdirSync(path.dirname(ADD_COUNT_FILE),{recursive:true}); fs.writeFileSync(ADD_COUNT_FILE,JSON.stringify({day:spDay(),count:addsToday()+n})); }catch{}
 }
+// Quem o sistema já adicionou em cada grupo (pedido do usuário em 2026-10-05): numa nova importação
+// essas pessoas são puladas, mesmo que tenham saído do grupo — adicionar de novo quem saiu é o que mais gera denúncia.
+const ADDED_FILE=path.resolve(__dirname,'../.cache/group-added.json');
+function readAdded():Record<string,string[]>{ try{ return JSON.parse(fs.readFileSync(ADDED_FILE,'utf8'))||{}; }catch{ return {}; } }
+function addedBefore(groupId:string){ return new Set(readAdded()[groupId]||[]); }
+function rememberAdded(groupId:string,phones:string[]){
+  if(!phones.length) return;
+  try{ const all=readAdded(); all[groupId]=[...new Set([...(all[groupId]||[]),...phones])]; fs.mkdirSync(path.dirname(ADDED_FILE),{recursive:true}); fs.writeFileSync(ADDED_FILE,JSON.stringify(all)); }catch{}
+}
+/** Embaralha uma cópia da lista (Fisher-Yates). */
+function shuffle<T>(list:T[]){ const a=[...list]; for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+
 /** Meia-noite de amanhã no horário de Brasília (o Brasil não tem horário de verão desde 2019: UTC-3). */
 function nextSpMidnight(){ const [y,m,d]=spDay().split('-').map(Number); return new Date(Date.UTC(y,m-1,d+1,3,0,5)); }
 
@@ -587,8 +599,12 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
     }else{ srcName=`arquivo ${body.fileName||'CSV'}`; srcPhones=[...new Set(body.phones!)]; }
   }catch(e:any){ return res.status(409).json({error:e.message}); }
   const inDest=new Set(dst.members.map(m=>m.phone||m.jid));
-  const todo=srcPhones.filter(p=>!inDest.has(p)).map(p=>`${p}@s.whatsapp.net`);
-  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,autoInvite:!!body.inviteText,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-todo.length,privacy:[],failed:[],noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
+  const before=addedBefore(body.to);
+  const fresh=srcPhones.filter(p=>!inDest.has(p));
+  // Ordem embaralhada: adicionar na sequência exata da planilha é padrão de robô.
+  const todo=shuffle(fresh.filter(p=>!before.has(p))).map(p=>`${p}@s.whatsapp.net`);
+  const skippedBefore=fresh.length-todo.length;
+  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,autoInvite:!!body.inviteText,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-fresh.length,privacy:[],failed:[],failReasons:{},skippedBefore,noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
   groupCopy=job;
   (async()=>{
     try{
@@ -604,7 +620,9 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
           job.waitingUntil=null;
           continue;
         }
-        const batch=todo.slice(i,i+Math.min(body.batch,room));
+        // Lote de tamanho variado (de 1 até o escolhido) para não ter um ritmo certinho de máquina.
+        const size=1+Math.floor(Math.random()*body.batch);
+        const batch=todo.slice(i,i+Math.min(size,room));
         i+=batch.length;
         countAdds(batch.length);
         let results;
@@ -614,15 +632,17 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
           if(/not-authorized|forbidden/i.test(String(e?.message||e))) throw new Error(`Você precisa ser administrador do grupo "${dst.name}" para adicionar pessoas.`);
           throw e;
         }
+        rememberAdded(body.to,results.filter(r=>r.result==='added'||r.result==='already').map(r=>r.jid.split('@')[0]));
         for(const r of results){
           const phone=r.jid.split('@')[0];
           if(r.result==='added') job.added++;
           else if(r.result==='already') job.already++;
           else if(r.result==='privacy') job.privacy.push(phone);
-          else job.failed.push(phone);
+          else { job.failed.push(phone); job.failReasons[phone]=r.reason||'erro desconhecido'; }
         }
         job.done+=batch.length;
-        if(i<todo.length) await wait(body.pauseSec*1000);
+        // Pausa variada: entre 70% e 150% do tempo escolhido.
+        if(i<todo.length) await wait(body.pauseSec*1000*(0.7+Math.random()*0.8));
       }
     }catch(e:any){ job.error=e?.message||String(e); }
     finally{

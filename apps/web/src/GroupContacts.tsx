@@ -4,7 +4,7 @@ import { api } from './api';
 
 type Group = { id: string; name: string; participants: number };
 type Invite = { total: number; sent: number; failed: string[]; running: boolean; error: string | null };
-type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; noPhone: number; running: boolean; error: string | null; finishedAt: string | null };
+type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null };
 
 function downloadCsv(fileName: string, rows: string[][]) {
   // BOM para o Excel abrir os acentos certinho; ";" é o separador que o Excel em português espera.
@@ -131,7 +131,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     downloadCsv(`nao adicionados - ${safeName(copy.toName)}.csv`, [
       ['Telefone', 'Motivo', 'Link do grupo'],
       ...copy.privacy.map(p => [`+${p}`, 'privacidade (mandar convite)', link]),
-      ...copy.failed.map(p => [`+${p}`, 'erro', link]),
+      ...copy.failed.map(p => [`+${p}`, copy.failReasons?.[p] || 'erro', link]),
     ]);
   }
 
@@ -204,7 +204,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
       </div>
       <p className="hint">O arquivo pode ser a planilha baixada em "Extrair contatos" ou um CSV/TXT com um telefone por linha, com DDD. Sem o 55 na frente, entende como número do Brasil.</p>
       <div className="form-row form-row-tight">
-        <label>Pessoas por vez
+        <label>Até quantas pessoas por vez
           <input type="number" min={1} max={20} value={batch} onChange={e => setBatch(Number(e.target.value))} />
         </label>
         <label>Esperar entre cada vez
@@ -218,6 +218,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
         <button className="outline" disabled={busy || !to} onClick={copyLink}><Link2 size={16} /> Copiar link do grupo</button>
       </div>
       <p className="hint">Hoje já foram adicionadas {addedToday} pessoa(s) (soma todas as importações do dia). Quando o limite do dia acaba, a importação espera a meia-noite e continua sozinha — o sistema precisa ficar ligado.</p>
+      <p className="hint">Para o WhatsApp não estranhar, a ordem é embaralhada e cada vez entra um número diferente de pessoas (até o que você escolheu), com esperas que variam um pouco. Quem o sistema já adicionou no grupo antes é pulado, mesmo que tenha saído.</p>
       <p className="hint">Só funciona se você for administrador do grupo de destino. Quem bloqueou ser adicionado por desconhecidos (privacidade) não entra direto — dá para mandar o link de convite no privado deles.</p>
       <label className="check-line">
         <input type="checkbox" checked={autoInvite} onChange={e => setAutoInvite(e.target.checked)} />
@@ -241,7 +242,13 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
             ? <div>Parando… o lote que já estava saindo termina e mais ninguém é adicionado.</div>
             : <button className="outline" style={{ marginTop: 8 }} disabled={busy} onClick={stopCopy}><Square size={16} /> Parar importação</button>)}
           {!copy.running && copy.stopped && <div>Importação parada por você.</div>}
-          <div>{copy.added} adicionado(s) · {copy.already} já estavam no grupo{copy.privacy.length ? ` · ${copy.privacy.length} bloqueados pela privacidade` : ''}{copy.failed.length ? ` · ${copy.failed.length} com erro` : ''}{copy.noPhone ? ` · ${copy.noPhone} com número oculto` : ''}</div>
+          <div>{copy.added} adicionado(s) · {copy.already} já estavam no grupo{copy.skippedBefore ? ` · ${copy.skippedBefore} pulados (o sistema já tinha adicionado antes)` : ''}{copy.privacy.length ? ` · ${copy.privacy.length} bloqueados pela privacidade` : ''}{copy.failed.length ? ` · ${copy.failed.length} com erro` : ''}{copy.noPhone ? ` · ${copy.noPhone} com número oculto` : ''}</div>
+          {copy.failed.length > 0 && (
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+              {copy.failed.slice(0, 20).map(p => <li key={p}>+{p}: {copy.failReasons?.[p] || 'erro (motivo não registrado)'}</li>)}
+              {copy.failed.length > 20 && <li>e mais {copy.failed.length - 20} — veja todos em "Baixar os que não entraram".</li>}
+            </ul>
+          )}
           {copy.error && <div>Ops, a importação parou: {copy.error}</div>}
           {!copy.running && (copy.privacy.length + copy.failed.length) > 0 && (
             <button className="outline" style={{ marginTop: 8 }} onClick={downloadLeftOut}>

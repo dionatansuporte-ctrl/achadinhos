@@ -221,18 +221,54 @@ export async function groupInviteLink(groupId: string): Promise<string> {
   return `https://chat.whatsapp.com/${code}`;
 }
 
-/** Resultado de adicionar um contato: ok, já estava, privacidade (só entra por convite) ou outro erro. */
-export type WaAddResult = { jid: string; result: 'added' | 'already' | 'privacy' | 'failed' };
+/** Resultado de adicionar um contato: ok, já estava, privacidade (só entra por convite) ou outro erro (com o motivo). */
+export type WaAddResult = { jid: string; result: 'added' | 'already' | 'privacy' | 'failed'; reason?: string };
 
-/** Adiciona contatos a um grupo (é preciso ser administrador dele). */
+/** O que cada código de erro do WhatsApp quer dizer, em português, para mostrar na tela. */
+function addErrorReason(code: string) {
+  if (code === '400') return 'número inválido';
+  if (code === '401') return 'o contato bloqueou o seu número';
+  if (code === '404') return 'número sem WhatsApp';
+  if (code === '408') return 'saiu do grupo há pouco (o WhatsApp não deixa adicionar de volta logo)';
+  if (code === '500') return 'grupo cheio';
+  if (!code) return 'o WhatsApp não respondeu sobre este número';
+  return `o WhatsApp recusou (código ${code})`;
+}
+
+/**
+ * Adiciona contatos a um grupo (é preciso ser administrador dele).
+ * Antes confere se o número tem WhatsApp: além de achar quem não tem, isso devolve o número do jeito que o
+ * WhatsApp guarda (celulares antigos do Brasil ficam sem o 9 na frente, e adicionar "com o 9" falha).
+ */
 export async function addGroupMembers(groupId: string, jids: string[]): Promise<WaAddResult[]> {
   if (!sock || status !== 'connected') throw new Error('WhatsApp não conectado. Escaneie o QR code em Canais.');
-  const res = await sock.groupParticipantsUpdate(groupId, jids, 'add');
-  return jids.map(jid => {
-    const r = res.find(x => x.jid === jid);
-    const code = String(r?.status || '');
-    // 200 = entrou; 409 = já é membro; 403 = a privacidade do contato não deixa adicionar (precisa de convite).
-    const result = code === '200' ? 'added' : code === '409' ? 'already' : code === '403' ? 'privacy' : 'failed';
-    return { jid, result };
-  });
+  const out = new Map<string, WaAddResult>();
+  const real = new Map<string, string>(); // jid do WhatsApp → jid como veio da lista
+  for (const [i, jid] of jids.entries()) {
+    // Uma folga de 1 a 3s entre as consultas, para não sair tudo no mesmo instante.
+    if (i) await new Promise(r => setTimeout(r, 1000 + Math.random() * 2000));
+    try {
+      const [hit] = (await sock.onWhatsApp(jid.split('@')[0])) || [];
+      if (hit?.exists && hit.jid) real.set(hit.jid, jid);
+      else out.set(jid, { jid, result: 'failed', reason: 'número sem WhatsApp' });
+    } catch { real.set(jid, jid); } // se a conferência falhar, tenta adicionar assim mesmo
+  }
+  if (real.size) {
+    const list = [...real.keys()];
+    const res = await sock.groupParticipantsUpdate(groupId, list, 'add');
+    list.forEach((rj, i) => {
+      const jid = real.get(rj)!;
+      const r = res.find(x => x.jid === rj) ?? (res.length === list.length ? res[i] : undefined);
+      const code = String(r?.status || '');
+      // 200 = entrou; 409 = já é membro; 403 = a privacidade do contato não deixa adicionar (precisa de convite).
+      if (code === '200') out.set(jid, { jid, result: 'added' });
+      else if (code === '409') out.set(jid, { jid, result: 'already' });
+      else if (code === '403') out.set(jid, { jid, result: 'privacy' });
+      else {
+        console.warn(`[grupo] não adicionou ${jid.split('@')[0]}: código ${code || '(vazio)'}`);
+        out.set(jid, { jid, result: 'failed', reason: addErrorReason(code) });
+      }
+    });
+  }
+  return jids.map(jid => out.get(jid)!);
 }
