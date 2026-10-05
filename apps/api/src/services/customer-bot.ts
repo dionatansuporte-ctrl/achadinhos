@@ -1,7 +1,7 @@
 import type { Customer, CustomerBot, Marketplace } from '@prisma/client';
 import { prisma } from '../db';
 import { onWhatsAppMessage, sendWhatsAppWebText, showTyping, getWaState, type WaIncoming } from '../integrations/whatsapp-web';
-import type { ShopeeOffer } from '../integrations/shopee';
+import { shopeeTrackedLink, type ShopeeOffer } from '../integrations/shopee';
 import { searchOffers } from './shopee-sync';
 import { isMarketplace, marketplaceIcon, marketplaceLabel, storeIn, storeOf, type SearchMarketplace } from './marketplaces';
 import { renderOffer, defaultOfferTemplate } from './offer';
@@ -271,11 +271,13 @@ async function reply(jid: string, text: string, imageUrl?: string) {
 }
 
 /** Texto de uma oferta para o cliente, com o cupom do marketplace se houver um válido que caiba. */
-function offerText(o: ShopeeOffer, coupons: Awaited<ReturnType<typeof productCoupons>>) {
+async function offerText(o: ShopeeOffer, coupons: Awaited<ReturnType<typeof productCoupons>>, customerId: string) {
   const marketplace = (o.marketplace || 'SHOPEE') as Marketplace;
+  // Shopee: link marcado com o cliente (subId "c<cliente>") para a tela de Vendas mostrar quem comprou.
+  const affiliateUrl = (marketplace === 'SHOPEE' && await shopeeTrackedLink(o.productUrl, `c${customerId}`)) || o.affiliateUrl;
   return renderOffer(defaultOfferTemplate(), {
     title: o.title, price: o.price, oldPrice: o.oldPrice, discountPercent: o.discountPercent,
-    couponText: pickCoupon(coupons, { marketplace, price: o.price ?? null }), affiliateUrl: o.affiliateUrl
+    couponText: pickCoupon(coupons, { marketplace, price: o.price ?? null }), affiliateUrl
   });
 }
 
@@ -504,7 +506,7 @@ export async function sendOffersTo(bot: CustomerBot, customer: Customer, keyword
   await reply(customer.jid, intro);
   const sent: any[] = [];
   for (const o of offers) {
-    const text = offerText(o, coupons);
+    const text = await offerText(o, coupons, customer.id);
     await reply(customer.jid, text, o.imageUrl);
     sent.push({ itemId: o.itemId, title: o.title, price: o.price, oldPrice: o.oldPrice, imageUrl: o.imageUrl, affiliateUrl: o.affiliateUrl, marketplace: o.marketplace || marketplaces[0] });
   }

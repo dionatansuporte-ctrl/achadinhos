@@ -1,6 +1,7 @@
 import { prisma } from '../db';
 import { sendWhatsAppText } from '../integrations/whatsapp';
 import { publishInstagramImage } from '../integrations/instagram';
+import { shopeeTrackedLink } from '../integrations/shopee';
 
 /**
  * Grupos de WhatsApp saem pela sessão Baileys, que vive só no processo da API
@@ -20,7 +21,7 @@ async function sendToWhatsAppGroup(jid: string, text: string, imageUrl: string |
 }
 
 export async function executePromotionJob(jobId:string){
-  const job=await prisma.promotionJob.findUnique({where:{id:jobId},include:{channel:true,automation:true}}); if(!job)throw new Error('Job não encontrado.');
+  const job=await prisma.promotionJob.findUnique({where:{id:jobId},include:{channel:true,automation:true,product:{select:{marketplace:true,productUrl:true}}}}); if(!job)throw new Error('Job não encontrado.');
   // Idempotência: a fila tenta de novo quando a tentativa anterior lançou erro. Se o envio na verdade
   // saiu (a API marcou SENT ao entregar, mas a resposta se perdeu), não manda em dobro.
   if(job.status==='SENT') return;
@@ -30,6 +31,14 @@ export async function executePromotionJob(jobId:string){
     return;
   }
   const payload:any=job.payloadJson||{}; await prisma.promotionJob.update({where:{id:jobId},data:{status:'PROCESSING',attempts:{increment:1}}});
+  // Shopee: o link sai marcado com o grupo (subId "g<canal>") para a tela de Vendas mostrar de onde veio cada pedido.
+  if(job.product?.marketplace==='SHOPEE'&&job.channel.type!=='INSTAGRAM'&&payload.affiliateUrl&&payload.text?.includes(payload.affiliateUrl)){
+    const tracked=payload.trackedUrl||await shopeeTrackedLink(job.product.productUrl,`g${job.channel.id}`);
+    if(tracked){
+      payload.text=payload.text.split(payload.affiliateUrl).join(tracked);
+      if(!payload.trackedUrl) await prisma.promotionJob.update({where:{id:jobId},data:{payloadJson:{...(job.payloadJson as any),trackedUrl:tracked}}}).catch(()=>{});
+    }
+  }
   try{
     if(job.channel.type==='WHATSAPP') await sendWhatsAppText(job.channel.destination,payload.text||'');
     else if(job.channel.type==='WHATSAPP_GROUP') await sendToWhatsAppGroup(job.channel.destination,payload.text||'',payload.imageUrl,jobId);

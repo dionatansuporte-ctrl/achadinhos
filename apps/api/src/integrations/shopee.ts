@@ -171,14 +171,15 @@ export type ShopeeSale = {
   qty: number;
   itemPrice?: number;
   commission: number; // R$ da comissão deste item
+  origin?: string;    // subId do link que gerou a venda: "g<canal>" (grupo) ou "c<cliente>" (privado)
 };
 
 // scrollId só entra na query quando existe: a API recusa o argumento com valor nulo.
-const conversionQuery = (withScroll: boolean) => `
+const conversionQuery = (withScroll: boolean, withUtm = true) => `
 query Conversoes($start: Int64, $end: Int64, $limit: Int${withScroll ? ', $scrollId: String' : ''}) {
   conversionReport(purchaseTimeStart: $start, purchaseTimeEnd: $end, limit: $limit${withScroll ? ', scrollId: $scrollId' : ''}) {
     nodes {
-      conversionId purchaseTime totalCommission
+      conversionId purchaseTime totalCommission${withUtm ? ' utmContent' : ''}
       orders { orderId orderStatus items { itemId itemName itemPrice qty imageUrl itemTotalCommission displayItemStatus } }
     }
     pageInfo { hasNextPage scrollId }
@@ -194,19 +195,33 @@ function normStatus(s: unknown): ShopeeSale['status'] {
   return 'OTHER';
 }
 
+/** utmContent chega como "subId1-subId2-..."; o nosso marcador é o que começa com g/c + id do banco. */
+const ORIGIN_RE = /^[gc][a-z0-9]{10,40}$/;
+function parseOrigin(utm: unknown): string | undefined {
+  return String(utm || '').split('-').map(x => x.trim()).find(x => ORIGIN_RE.test(x));
+}
+
 /** Todas as vendas atribuídas à conta no período (pagina até acabar; o scrollId vale 30 s). */
 export async function fetchShopeeSales(start: Date, end: Date): Promise<ShopeeSale[]> {
   const out: ShopeeSale[] = [];
   let scrollId: string | undefined;
+  let withUtm = true;
+  type Rep = { conversionReport: { nodes: any[]; pageInfo: { hasNextPage: boolean; scrollId?: string } } };
   for (let page = 0; page < 40; page++) {
-    const data = await graphql<{ conversionReport: { nodes: any[]; pageInfo: { hasNextPage: boolean; scrollId?: string } } }>(
-      conversionQuery(!!scrollId),
-      // Int64 nesta API só aceita como string no JSON de variáveis.
-      { start: String(Math.floor(start.getTime() / 1000)), end: String(Math.floor(end.getTime() / 1000)), limit: 100, ...(scrollId ? { scrollId } : {}) }
-    );
+    // Int64 nesta API só aceita como string no JSON de variáveis.
+    const vars = { start: String(Math.floor(start.getTime() / 1000)), end: String(Math.floor(end.getTime() / 1000)), limit: 100, ...(scrollId ? { scrollId } : {}) };
+    let data: Rep;
+    try { data = await graphql<Rep>(conversionQuery(!!scrollId, withUtm), vars); }
+    catch (e: any) {
+      // Conta sem o campo utmContent: segue sem saber a origem em vez de perder o relatório inteiro.
+      if (!withUtm || !/utmContent/i.test(e.message)) throw e;
+      withUtm = false;
+      data = await graphql<Rep>(conversionQuery(!!scrollId, false), vars);
+    }
     const rep = data?.conversionReport;
     for (const n of rep?.nodes || []) {
       const purchaseTime = new Date(Number(n.purchaseTime) * 1000);
+      const origin = parseOrigin(n.utmContent);
       for (const o of n.orders || []) {
         for (const it of o.items || []) {
           out.push({
@@ -219,7 +234,8 @@ export async function fetchShopeeSales(start: Date, end: Date): Promise<ShopeeSa
             imageUrl: it.imageUrl || undefined,
             qty: Number(it.qty) || 1,
             itemPrice: num(it.itemPrice),
-            commission: num(it.itemTotalCommission) ?? 0
+            commission: num(it.itemTotalCommission) ?? 0,
+            origin
           });
         }
       }
@@ -254,4 +270,26 @@ mutation Curto($originUrl: String!, $subIds: [String!]) {
   const link = data?.generateShortLink?.shortLink;
   if (!link) throw new Error('Shopee não devolveu o link curto.');
   return link;
+}
+
+/**
+ * Link de afiliado da Shopee marcado com a origem (subId), para o relatório mostrar de qual grupo
+ * ou cliente veio cada venda. origin = "g<id do canal>" ou "c<id do cliente>".
+ * Falhou (Shopee fora, subId recusado)? Devolve null e quem chamou manda o link de sempre.
+ */
+const trackedCache = new Map<string, string>();
+export async function shopeeTrackedLink(productUrl: string | null | undefined, origin: string): Promise<string | null> {
+  if (!productUrl || !/shopee\.com\.br/i.test(productUrl) || !ORIGIN_RE.test(origin)) return null;
+  const key = `${productUrl}|${origin}`;
+  const hit = trackedCache.get(key);
+  if (hit) return hit;
+  try {
+    const link = await generateShopeeShortLink(productUrl, [origin]);
+    if (trackedCache.size > 2000) trackedCache.clear();
+    trackedCache.set(key, link);
+    return link;
+  } catch (e: any) {
+    console.error(`[shopee] link com origem ${origin} falhou, vai o link normal: ${e.message}`);
+    return null;
+  }
 }
