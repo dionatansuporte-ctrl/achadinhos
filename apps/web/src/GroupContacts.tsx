@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Download, FileUp, Link2, Send, Square, UserPlus, Users } from 'lucide-react';
+import { Download, FileUp, Link2, Play, Send, Square, UserPlus, Users } from 'lucide-react';
 import { api } from './api';
 
 type Group = { id: string; name: string; participants: number };
 type Invite = { total: number; sent: number; failed: string[]; running: boolean; error: string | null };
-type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null };
+type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null; left?: number };
 
 function downloadCsv(fileName: string, rows: string[][]) {
   // BOM para o Excel abrir os acentos certinho; ";" é o separador que o Excel em português espera.
@@ -110,6 +110,31 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     setBusy(true);
     try { const r = await api.post('/api/whatsapp/groups/copy/stop'); setCopy(r.data); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível parar a importação.'); }
+    finally { setBusy(false); }
+  }
+
+  // Limite por dia digitado no quadro da importação (null = ainda é o da própria importação).
+  const [jobLimit, setJobLimit] = useState<number | null>(null);
+  const cleanLimit = (n: number) => Math.min(1000, Math.max(1, Math.round(n) || 50));
+
+  /** Troca o limite por dia da importação que está rodando; se ela esperava a meia-noite e o limite novo deixa espaço, volta na hora. */
+  async function changeLimit() {
+    if (!copy || jobLimit == null) return;
+    setBusy(true); setMsg('');
+    try { const r = await api.post('/api/whatsapp/groups/copy/settings', { dailyLimit: cleanLimit(jobLimit) }); setCopy(r.data); setAddedToday(r.data.addedToday || 0); setJobLimit(null); }
+    catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível mudar o limite.'); }
+    finally { setBusy(false); }
+  }
+
+  /** Continua de onde parou uma importação parada, com o limite por dia escolhido no quadro. */
+  async function resumeCopy() {
+    if (!copy) return;
+    const limit = cleanLimit(jobLimit ?? copy.dailyLimit ?? dailyLimit);
+    const left = copy.left ?? copy.total - copy.done;
+    if (!confirm(`Continuar a importação para "${copy.toName}" de onde parou?\n\nFaltam ${left} pessoa(s). Com limite de ${limit} por dia, leva ${fmtPlan(left, copy.batch || batch, copy.pauseSec || pauseSec, limit, addedToday)}.`)) return;
+    setBusy(true); setMsg('');
+    try { const r = await api.post('/api/whatsapp/groups/copy/resume', { dailyLimit: limit }); setCopy(r.data); setAddedToday(r.data.addedToday || 0); setJobLimit(null); }
+    catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível continuar a importação.'); }
     finally { setBusy(false); }
   }
 
@@ -237,11 +262,30 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
         <div className="inline-msg">
           <b>{copy.running ? 'Importando' : 'Importação'}: {copy.fromName} → {copy.toName}</b>
           {copy.running && <div>{copy.done} de {copy.total} ({pct}%)…{copy.batch && copy.pauseSec ? ` ${copy.batch} pessoa(s) a cada ${fmtPause(copy.pauseSec)}, faltam ${fmtPlan(copy.total - copy.done, copy.batch, copy.pauseSec, copy.dailyLimit || 1000, addedToday)}.` : ''}</div>}
-          {copy.running && copy.waitingUntil && <div>⏸️ Limite de {copy.dailyLimit} por dia atingido. Continua sozinha {new Date(copy.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })}.</div>}
+          {copy.running && copy.waitingUntil && <div>⏸️ Limite de {copy.dailyLimit} por dia atingido. Continua sozinha {new Date(copy.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })} — ou aumente o limite aqui embaixo para continuar agora.</div>}
           {copy.running && (copy.stopped
             ? <div>Parando… o lote que já estava saindo termina e mais ninguém é adicionado.</div>
             : <button className="outline" style={{ marginTop: 8 }} disabled={busy} onClick={stopCopy}><Square size={16} /> Parar importação</button>)}
           {!copy.running && copy.stopped && <div>Importação parada por você.</div>}
+          {copy.running && !copy.stopped && (
+            <div className="form-row form-row-tight" style={{ marginTop: 8 }}>
+              <label>Limite por dia desta importação
+                <input type="number" min={1} max={1000} value={jobLimit ?? copy.dailyLimit ?? ''} onChange={e => setJobLimit(Number(e.target.value))} />
+              </label>
+              <button className="outline" disabled={busy || jobLimit == null || jobLimit === copy.dailyLimit} onClick={changeLimit}>Mudar limite</button>
+            </div>
+          )}
+          {!copy.running && !copy.invite?.running && (copy.left ?? copy.total - copy.done) > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div>Faltam {copy.left ?? copy.total - copy.done} pessoa(s) para adicionar. Hoje já entraram {addedToday}; escolha o limite por dia e continue de onde parou.</div>
+              <div className="form-row form-row-tight">
+                <label>Limite por dia
+                  <input type="number" min={1} max={1000} value={jobLimit ?? copy.dailyLimit ?? dailyLimit} onChange={e => setJobLimit(Number(e.target.value))} />
+                </label>
+                <button className="primary" disabled={busy} onClick={resumeCopy}><Play size={16} /> Continuar de onde parou</button>
+              </div>
+            </div>
+          )}
           <div>{copy.added} adicionado(s) · {copy.already} já estavam no grupo{copy.skippedBefore ? ` · ${copy.skippedBefore} pulados (o sistema já tinha adicionado antes)` : ''}{copy.privacy.length ? ` · ${copy.privacy.length} bloqueados pela privacidade` : ''}{copy.failed.length ? ` · ${copy.failed.length} com erro` : ''}{copy.noPhone ? ` · ${copy.noPhone} com número oculto` : ''}</div>
           {copy.failed.length > 0 && (
             <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>

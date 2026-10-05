@@ -547,6 +547,9 @@ app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:an
 type GroupInvite={total:number;sent:number;failed:string[];running:boolean;error:string|null};
 type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];failReasons:Record<string,string>;skippedBefore:number;noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
 let groupCopy:GroupCopy|null=null;
+// Quem ainda falta adicionar na importação atual (fica fora do GroupCopy para não ir inteiro para a tela) e o convite automático dela.
+let groupCopyRest:string[]=[];
+let groupCopyInviteText:string|undefined;
 
 // Limite de pessoas adicionadas por dia (pedido do usuário em 2026-10-04). A contagem soma todas as
 // importações do dia e fica em disco, para valer mesmo se o sistema reiniciar. Tentativa conta
@@ -574,12 +577,36 @@ function shuffle<T>(list:T[]){ const a=[...list]; for(let i=a.length-1;i>0;i--){
 /** Meia-noite de amanhã no horário de Brasília (o Brasil não tem horário de verão desde 2019: UTC-3). */
 function nextSpMidnight(){ const [y,m,d]=spDay().split('-').map(Number); return new Date(Date.UTC(y,m-1,d+1,3,0,5)); }
 
-app.get('/api/whatsapp/groups/copy', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json(groupCopy?{...groupCopy,addedToday:addsToday()}:{addedToday:addsToday(),none:true}); });
+// O que a tela recebe: a importação atual, quantos ainda faltam (left) e quantos já entraram hoje.
+const copyPayload=()=>groupCopy?{...groupCopy,left:groupCopyRest.length,addedToday:addsToday()}:{addedToday:addsToday(),none:true};
+app.get('/api/whatsapp/groups/copy', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json(copyPayload()); });
 // Para a importação em andamento (o lote que está saindo termina; nada mais é adicionado).
 app.post('/api/whatsapp/groups/copy/stop', requireAuth, (req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
   if(!groupCopy?.running) return res.status(409).json({error:'Não há importação em andamento.'});
-  groupCopy.stopped=true; res.json(groupCopy);
+  groupCopy.stopped=true; res.json(copyPayload());
+});
+// Muda o limite por dia (e, se vier, o ritmo) da importação em andamento (pedido do usuário em 2026-10-05).
+// Se ela estava esperando a meia-noite e o novo limite deixa espaço, volta a adicionar na hora.
+app.post('/api/whatsapp/groups/copy/settings', requireAuth, (req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({batch:z.coerce.number().int().min(1).max(20).optional(),pauseSec:z.coerce.number().int().min(10).max(3600).optional(),dailyLimit:z.coerce.number().int().min(1).max(1000)}).parse(req.body);
+  if(!groupCopy?.running||groupCopy.stopped) return res.status(409).json({error:'Não há importação em andamento.'});
+  Object.assign(groupCopy,{dailyLimit:body.dailyLimit,...(body.batch?{batch:body.batch}:{}),...(body.pauseSec?{pauseSec:body.pauseSec}:{})});
+  res.json(copyPayload());
+});
+// Continua de onde parou uma importação parada (pela pessoa ou por erro), podendo trocar limite e ritmo.
+app.post('/api/whatsapp/groups/copy/resume', requireAuth, (req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({batch:z.coerce.number().int().min(1).max(20).optional(),pauseSec:z.coerce.number().int().min(10).max(3600).optional(),dailyLimit:z.coerce.number().int().min(1).max(1000)}).parse(req.body);
+  const job=groupCopy;
+  if(!job) return res.status(409).json({error:'Não há importação para continuar.'});
+  if(job.running) return res.status(409).json({error:'A importação ainda está rodando.'});
+  if(job.invite?.running) return res.status(409).json({error:'Espere os convites terminarem de sair.'});
+  if(!groupCopyRest.length) return res.status(409).json({error:'Não falta ninguém para adicionar nessa importação.'});
+  Object.assign(job,{dailyLimit:body.dailyLimit,...(body.batch?{batch:body.batch}:{}),...(body.pauseSec?{pauseSec:body.pauseSec}:{}),stopped:false,error:null,finishedAt:null,running:true});
+  runGroupCopy(job);
+  res.status(202).json(copyPayload());
 });
 app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
@@ -605,34 +632,41 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   const todo=shuffle(fresh.filter(p=>!before.has(p))).map(p=>`${p}@s.whatsapp.net`);
   const skippedBefore=fresh.length-todo.length;
   const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,autoInvite:!!body.inviteText,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-fresh.length,privacy:[],failed:[],failReasons:{},skippedBefore,noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
-  groupCopy=job;
+  groupCopy=job; groupCopyRest=todo; groupCopyInviteText=body.inviteText;
+  if(todo.length) runGroupCopy(job);
+  res.status(202).json(job);
+}));
+
+/** Adiciona em segundo plano quem falta em groupCopyRest. Limite do dia, lote e pausa são lidos do job a cada volta, porque podem mudar no meio. */
+function runGroupCopy(job:GroupCopy){
   (async()=>{
     try{
-      // Espera em fatias de 30s para o "Parar" responder logo.
-      const wait=async(ms:number)=>{ const end=Date.now()+ms; while(!job.stopped&&Date.now()<end) await new Promise(r=>setTimeout(r,Math.min(30_000,end-Date.now()))); };
-      let i=0;
-      while(i<todo.length&&!job.stopped){
-        // Bateu o limite do dia: espera a virada do dia e continua sozinho.
-        let room=job.dailyLimit-addsToday();
+      // Espera em fatias curtas para o "Parar" (e a troca do limite) responder logo.
+      const wait=async(ms:number,until=()=>false)=>{ const end=Date.now()+ms; while(!job.stopped&&!until()&&Date.now()<end) await new Promise(r=>setTimeout(r,Math.min(5_000,end-Date.now()))); };
+      while(groupCopyRest.length&&!job.stopped&&groupCopy===job){
+        // Bateu o limite do dia: espera a virada do dia (ou a pessoa aumentar o limite) e continua sozinho.
+        const room=job.dailyLimit-addsToday();
         if(room<=0){
           job.waitingUntil=nextSpMidnight().toISOString();
-          await wait(new Date(job.waitingUntil).getTime()-Date.now());
+          await wait(new Date(job.waitingUntil).getTime()-Date.now(),()=>job.dailyLimit>addsToday());
           job.waitingUntil=null;
           continue;
         }
         // Lote de tamanho variado (de 1 até o escolhido) para não ter um ritmo certinho de máquina.
-        const size=1+Math.floor(Math.random()*body.batch);
-        const batch=todo.slice(i,i+Math.min(size,room));
-        i+=batch.length;
+        const size=1+Math.floor(Math.random()*job.batch);
+        const batch=groupCopyRest.slice(0,Math.min(size,room));
+        groupCopyRest=groupCopyRest.slice(batch.length);
         countAdds(batch.length);
         let results;
-        try{ results=await addGroupMembers(body.to,batch); }
+        try{ results=await addGroupMembers(job.toId,batch); }
         catch(e:any){
+          // Não chegou a adicionar: o lote volta para a fila, para o "Continuar" tentar de novo.
+          groupCopyRest=[...batch,...groupCopyRest];
           // Sem ser administrador do destino não adianta continuar.
-          if(/not-authorized|forbidden/i.test(String(e?.message||e))) throw new Error(`Você precisa ser administrador do grupo "${dst.name}" para adicionar pessoas.`);
+          if(/not-authorized|forbidden/i.test(String(e?.message||e))) throw new Error(`Você precisa ser administrador do grupo "${job.toName}" para adicionar pessoas.`);
           throw e;
         }
-        rememberAdded(body.to,results.filter(r=>r.result==='added'||r.result==='already').map(r=>r.jid.split('@')[0]));
+        rememberAdded(job.toId,results.filter(r=>r.result==='added'||r.result==='already').map(r=>r.jid.split('@')[0]));
         for(const r of results){
           const phone=r.jid.split('@')[0];
           if(r.result==='added') job.added++;
@@ -642,23 +676,22 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
         }
         job.done+=batch.length;
         // Pausa variada: entre 70% e 150% do tempo escolhido.
-        if(i<todo.length) await wait(body.pauseSec*1000*(0.7+Math.random()*0.8));
+        if(groupCopyRest.length) await wait(job.pauseSec*1000*(0.7+Math.random()*0.8));
       }
     }catch(e:any){ job.error=e?.message||String(e); }
     finally{
-      // Convite automático (inviteText veio junto): ao terminar, manda no privado de quem a privacidade barrou.
-      // Se a importação foi parada pela pessoa, não manda — ela pode mandar pelo botão se quiser.
+      // Convite automático: ao terminar, manda no privado de quem a privacidade barrou.
+      // Se a importação foi parada pela pessoa (ou deu erro e pode continuar), não manda — ela pode mandar pelo botão se quiser.
       // O convite já nasce "running" antes de a importação acabar, para a tela não parar de atualizar no meio.
-      if(body.inviteText&&job.privacy.length&&!job.stopped) job.invite={total:job.privacy.length,sent:0,failed:[],running:true,error:null};
+      if(groupCopyInviteText&&job.privacy.length&&!job.stopped&&!job.error&&!job.invite) job.invite={total:job.privacy.length,sent:0,failed:[],running:true,error:null};
       job.running=false; job.waitingUntil=null; job.finishedAt=new Date().toISOString();
     }
     if(job.invite?.running){
-      const err=await startInvites(job,body.inviteText!).catch((e:any)=>e?.message||String(e));
+      const err=await startInvites(job,groupCopyInviteText!).catch((e:any)=>e?.message||String(e));
       if(err) job.invite={total:job.privacy.length,sent:0,failed:[],running:false,error:err};
     }
   })();
-  res.status(202).json(job);
-}));
+}
 
 // Link de convite do grupo, para mandar a quem não pôde ser adicionado direto.
 app.get('/api/whatsapp/groups/:id/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
