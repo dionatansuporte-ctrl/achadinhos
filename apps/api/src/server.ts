@@ -545,7 +545,7 @@ app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:an
 // Importação de contatos de um grupo para outro. Roda em segundo plano, em lotes pequenos
 // e com pausa entre eles: adicionar muita gente de uma vez é o jeito mais rápido de o número ser bloqueado.
 type GroupInvite={total:number;sent:number;failed:string[];running:boolean;error:string|null};
-type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
+type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
 let groupCopy:GroupCopy|null=null;
 
 // Limite de pessoas adicionadas por dia (pedido do usuário em 2026-10-04). A contagem soma todas as
@@ -573,7 +573,7 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   if(!requireAdmin(req,res))return;
   // Quantas pessoas por vez e quanto esperar entre os lotes: quem importa escolhe (padrão 5 a cada 30s).
   // A origem é outro grupo (from) ou uma lista de telefones vinda de planilha (phones).
-  const body=z.object({from:z.string().endsWith('@g.us').optional(),phones:z.array(z.string().regex(/^\d{10,15}$/)).min(1).max(5000).optional(),fileName:z.string().max(200).optional(),to:z.string().endsWith('@g.us'),batch:z.coerce.number().int().min(1).max(20).default(5),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50)}).parse(req.body);
+  const body=z.object({from:z.string().endsWith('@g.us').optional(),phones:z.array(z.string().regex(/^\d{10,15}$/)).min(1).max(5000).optional(),fileName:z.string().max(200).optional(),to:z.string().endsWith('@g.us'),batch:z.coerce.number().int().min(1).max(20).default(5),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50),inviteText:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem do convite precisa ter {link} no lugar do link do grupo.').optional()}).parse(req.body);
   if(!body.from&&!body.phones) return res.status(400).json({error:'Escolha o grupo de origem ou um arquivo com os telefones.'});
   if(body.from===body.to) return res.status(400).json({error:'Escolha grupos diferentes.'});
   if(groupCopy?.running) return res.status(409).json({error:'Já existe uma importação em andamento.'});
@@ -588,7 +588,7 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   }catch(e:any){ return res.status(409).json({error:e.message}); }
   const inDest=new Set(dst.members.map(m=>m.phone||m.jid));
   const todo=srcPhones.filter(p=>!inDest.has(p)).map(p=>`${p}@s.whatsapp.net`);
-  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-todo.length,privacy:[],failed:[],noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
+  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,autoInvite:!!body.inviteText,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-todo.length,privacy:[],failed:[],noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
   groupCopy=job;
   (async()=>{
     try{
@@ -625,7 +625,17 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
         if(i<todo.length) await wait(body.pauseSec*1000);
       }
     }catch(e:any){ job.error=e?.message||String(e); }
-    finally{ job.running=false; job.waitingUntil=null; job.finishedAt=new Date().toISOString(); }
+    finally{
+      // Convite automático (inviteText veio junto): ao terminar, manda no privado de quem a privacidade barrou.
+      // Se a importação foi parada pela pessoa, não manda — ela pode mandar pelo botão se quiser.
+      // O convite já nasce "running" antes de a importação acabar, para a tela não parar de atualizar no meio.
+      if(body.inviteText&&job.privacy.length&&!job.stopped) job.invite={total:job.privacy.length,sent:0,failed:[],running:true,error:null};
+      job.running=false; job.waitingUntil=null; job.finishedAt=new Date().toISOString();
+    }
+    if(job.invite?.running){
+      const err=await startInvites(job,body.inviteText!).catch((e:any)=>e?.message||String(e));
+      if(err) job.invite={total:job.privacy.length,sent:0,failed:[],running:false,error:err};
+    }
   })();
   res.status(202).json(job);
 }));
@@ -646,10 +656,17 @@ app.post('/api/whatsapp/groups/copy/invite', requireAuth, asyncRoute(async(req:a
   if(!job||job.running) return res.status(409).json({error:'Espere a importação terminar para mandar os convites.'});
   if(job.invite?.running) return res.status(409).json({error:'Os convites já estão sendo enviados.'});
   if(!job.privacy.length) return res.status(400).json({error:'Ninguém ficou de fora por privacidade.'});
+  const err=await startInvites(job,body.text);
+  if(err) return res.status(409).json({error:err});
+  res.status(202).json(job);
+}));
+
+/** Começa a mandar o convite em segundo plano para quem ficou de fora por privacidade. Devolve o erro, se não deu nem para começar. */
+async function startInvites(job:GroupCopy,template:string):Promise<string|null>{
   let link:string;
   try{ link=await groupInviteLink(job.toId); }
-  catch(e:any){ return res.status(409).json({error:/not-authorized|forbidden/i.test(String(e?.message||e))?`Você precisa ser administrador do grupo "${job.toName}" para pegar o link de convite.`:e.message}); }
-  const text=body.text.replaceAll('{link}',link).replaceAll('{grupo}',job.toName);
+  catch(e:any){ return /not-authorized|forbidden/i.test(String(e?.message||e))?`Você precisa ser administrador do grupo "${job.toName}" para pegar o link de convite.`:e.message; }
+  const text=template.replaceAll('{link}',link).replaceAll('{grupo}',job.toName);
   const phones=[...job.privacy];
   const inv:GroupInvite={total:phones.length,sent:0,failed:[],running:true,error:null};
   job.invite=inv;
@@ -666,8 +683,8 @@ app.post('/api/whatsapp/groups/copy/invite', requireAuth, asyncRoute(async(req:a
     }catch(e:any){ inv.error=e?.message||String(e); }
     finally{ inv.running=false; }
   })();
-  res.status(202).json(job);
-}));
+  return null;
+}
 
 // Liga o envio para os grupos escolhidos: cria o canal dos que ainda não são canal e reativa os pausados.
 app.post('/api/whatsapp/channels', requireAuth, asyncRoute(async(req:any,res:any)=>{

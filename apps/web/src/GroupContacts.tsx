@@ -4,7 +4,7 @@ import { api } from './api';
 
 type Group = { id: string; name: string; participants: number };
 type Invite = { total: number; sent: number; failed: string[]; running: boolean; error: string | null };
-type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; noPhone: number; running: boolean; error: string | null; finishedAt: string | null };
+type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; noPhone: number; running: boolean; error: string | null; finishedAt: string | null };
 
 function downloadCsv(fileName: string, rows: string[][]) {
   // BOM para o Excel abrir os acentos certinho; ";" é o separador que o Excel em português espera.
@@ -75,6 +75,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
   const [dailyLimit, setDailyLimit] = useState(50);
   const [addedToday, setAddedToday] = useState(0);
   const [inviteText, setInviteText] = useState(DEFAULT_INVITE);
+  const [autoInvite, setAutoInvite] = useState(true);
   const [file, setFile] = useState<File | null>(null);
 
   // Sem importação, a API devolve só a contagem do dia ({ none: true, addedToday }).
@@ -149,13 +150,14 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
 
   async function importTo() {
     if (!from || !to) return setMsg('Escolha o grupo de origem e o de destino.');
+    if (autoInvite && !inviteText.includes('{link}')) return setMsg('A mensagem do convite precisa ter {link} no lugar do link do grupo.');
     if (from === to) return setMsg('Escolha grupos diferentes.');
     const src = groups.find(g => g.id === from), d = groups.find(g => g.id === to)?.name;
     const size = Math.min(20, Math.max(1, Math.round(batch) || 5));
     const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
     if (!confirm(`Adicionar os membros de "${src?.name}" no grupo "${d}"?\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — com ${src?.participants || 0} membros, leva ${fmtPlan(src?.participants || 0, size, pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy', { from, to, batch: size, pauseSec, dailyLimit: limit }); setCopy(r.data); }
+    try { const r = await api.post('/api/whatsapp/groups/copy', { from, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined }); setCopy(r.data); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a importação.'); }
     finally { setBusy(false); }
   }
@@ -163,6 +165,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
   async function importFile() {
     if (!file) return setMsg('Escolha o arquivo com os telefones.');
     if (!to) return setMsg('Escolha o grupo de destino.');
+    if (autoInvite && !inviteText.includes('{link}')) return setMsg('A mensagem do convite precisa ter {link} no lugar do link do grupo.');
     const { phones, skipped } = parsePhones(await file.text());
     if (!phones.length) return setMsg('Não achei nenhum telefone no arquivo. Coloque um número por linha, com DDD (ex.: 11 91234-5678).');
     const d = groups.find(g => g.id === to)?.name;
@@ -170,7 +173,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
     if (!confirm(`Adicionar ${phones.length} telefone(s) do arquivo "${file.name}" no grupo "${d}"?${skipped ? `\n(${skipped} linha(s) sem telefone válido foram ignoradas.)` : ''}\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — leva ${fmtPlan(phones.length, size, pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy', { phones, fileName: file.name, to, batch: size, pauseSec, dailyLimit: limit }); setCopy(r.data); }
+    try { const r = await api.post('/api/whatsapp/groups/copy', { phones, fileName: file.name, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined }); setCopy(r.data); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a importação.'); }
     finally { setBusy(false); }
   }
@@ -215,7 +218,19 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
         <button className="outline" disabled={busy || !to} onClick={copyLink}><Link2 size={16} /> Copiar link do grupo</button>
       </div>
       <p className="hint">Hoje já foram adicionadas {addedToday} pessoa(s) (soma todas as importações do dia). Quando o limite do dia acaba, a importação espera a meia-noite e continua sozinha — o sistema precisa ficar ligado.</p>
-      <p className="hint">Só funciona se você for administrador do grupo de destino. Quem bloqueou ser adicionado por desconhecidos (privacidade) não entra direto — no fim da importação dá para mandar o link de convite no privado deles.</p>
+      <p className="hint">Só funciona se você for administrador do grupo de destino. Quem bloqueou ser adicionado por desconhecidos (privacidade) não entra direto — dá para mandar o link de convite no privado deles.</p>
+      <label className="check-line">
+        <input type="checkbox" checked={autoInvite} onChange={e => setAutoInvite(e.target.checked)} />
+        Mandar o convite no privado automaticamente para quem a privacidade bloquear
+      </label>
+      {autoInvite && (
+        <>
+          <label style={{ display: 'block', marginTop: 8 }}>Mensagem do convite (use {'{grupo}'} e {'{link}'})
+            <textarea rows={5} value={inviteText} onChange={e => setInviteText(e.target.value)} />
+          </label>
+          <p className="hint">Sai quando a importação terminar, uma mensagem por vez com uns 30 segundos entre elas. Se você parar a importação, os convites não saem sozinhos (dá para mandar pelo botão depois).</p>
+        </>
+      )}
 
       {copy && (
         <div className="inline-msg">
@@ -239,7 +254,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
               {copy.invite.error && <div>Ops, o envio parou: {copy.invite.error}</div>}
             </div>
           )}
-          {!copy.running && copy.privacy.length > 0 && !copy.invite?.running && (
+          {!copy.running && copy.privacy.length > 0 && !copy.invite?.running && (!copy.autoInvite || copy.invite || copy.stopped) && (
             <div style={{ marginTop: 10 }}>
               <label>Mensagem do convite (use {'{grupo}'} e {'{link}'})
                 <textarea rows={5} value={inviteText} onChange={e => setInviteText(e.target.value)} />
