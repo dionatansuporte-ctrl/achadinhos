@@ -669,14 +669,26 @@ app.post('/api/whatsapp/groups/copy/invite', requireAuth, asyncRoute(async(req:a
   res.status(202).json(job);
 }));
 
-// Cria canais a partir dos grupos escolhidos; ignora os que já existem.
+// Liga o envio para os grupos escolhidos: cria o canal dos que ainda não são canal e reativa os pausados.
 app.post('/api/whatsapp/channels', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const body=z.object({groups:z.array(z.object({id:z.string(),name:z.string()})).min(1)}).parse(req.body);
-  const existing=await prisma.channel.findMany({where:{userId:req.user.id,type:'WHATSAPP_GROUP'},select:{destination:true}});
-  const have=new Set(existing.map(c=>c.destination));
-  const created=[];
-  for(const g of body.groups){ if(have.has(g.id)) continue; created.push(await prisma.channel.create({data:{userId:req.user.id,type:'WHATSAPP_GROUP',name:g.name,destination:g.id}})); }
-  res.status(201).json({created:created.length,skipped:body.groups.length-created.length});
+  const existing=await prisma.channel.findMany({where:{userId:req.user.id,type:'WHATSAPP_GROUP'},select:{id:true,destination:true,enabled:true}});
+  const have=new Map(existing.map(c=>[c.destination,c]));
+  let created=0; const resume:string[]=[];
+  for(const g of body.groups){
+    const c=have.get(g.id);
+    if(!c){ await prisma.channel.create({data:{userId:req.user.id,type:'WHATSAPP_GROUP',name:g.name,destination:g.id}}); created++; }
+    else if(!c.enabled) resume.push(c.id);
+  }
+  if(resume.length) await prisma.channel.updateMany({where:{id:{in:resume}},data:{enabled:true}});
+  res.status(201).json({created,resumed:resume.length,skipped:body.groups.length-created-resume.length});
+}));
+
+// Para o envio nos grupos escolhidos (o canal fica pausado, não é excluído).
+app.post('/api/whatsapp/channels/pause', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({groupIds:z.array(z.string()).min(1)}).parse(req.body);
+  const r=await prisma.channel.updateMany({where:{userId:req.user.id,type:'WHATSAPP_GROUP',destination:{in:body.groupIds},enabled:true},data:{enabled:false}});
+  res.json({paused:r.count});
 }));
 
 // Envio imediato de produtos para canais escolhidos (usado pela tela Capturar ofertas).

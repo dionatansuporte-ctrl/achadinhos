@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { CheckCircle2, LogOut, MessageCircle, Plus, RefreshCw, Smartphone } from 'lucide-react';
+import { CheckCircle2, LogOut, MessageCircle, Pause, Play, RefreshCw, Smartphone } from 'lucide-react';
 import { api } from './api';
 import GroupContacts from './GroupContacts';
 
 type State = { status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; error?: string | null; hasSession?: boolean };
 type Group = { id: string; name: string; participants: number };
+type Channel = { id: string; type: string; destination: string; enabled: boolean };
 
-/** Painel de pareamento do WhatsApp por QR code e escolha dos grupos que viram canais. */
-export default function WhatsAppWeb({ onChanged }: { onChanged: () => void }) {
+/** Painel de pareamento do WhatsApp por QR code e escolha dos grupos que recebem ofertas (enviar / parar envio). */
+export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel[]; onChanged: () => void }) {
   const [st, setSt] = useState<State>({ status: 'disconnected' });
   const [groups, setGroups] = useState<Group[]>([]);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
@@ -49,16 +50,32 @@ export default function WhatsAppWeb({ onChanged }: { onChanged: () => void }) {
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível listar os grupos.'); }
   }
 
-  async function addChannels() {
-    const chosen = groups.filter(g => picked[g.id]);
+  // Canal de cada grupo (pelo id do grupo), para mostrar se está enviando ou parado.
+  const byGroup = new Map(channels.filter(c => c.type === 'WHATSAPP_GROUP').map(c => [c.destination, c]));
+  const sending = (g: Group) => !!byGroup.get(g.id)?.enabled;
+
+  async function startSending(chosen: Group[]) {
     if (!chosen.length) return setMsg('Marque ao menos um grupo.');
     setBusy(true); setMsg('');
     try {
       const r = await api.post('/api/whatsapp/channels', { groups: chosen.map(g => ({ id: g.id, name: g.name })) });
-      setMsg(`${r.data.created} grupo(s) adicionados como canal${r.data.skipped ? `, ${r.data.skipped} já existiam` : ''}.`);
+      const on = r.data.created + r.data.resumed;
+      setMsg(on ? `Pronto! ${on} grupo(s) passaram a receber ofertas.` : 'Esses grupos já estavam recebendo ofertas.');
       setPicked({});
       onChanged();
-    } catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível adicionar.'); }
+    } catch (e: any) { setMsg(e?.response?.data?.error || 'Desculpe, não consegui ligar o envio. Tente de novo.'); }
+    finally { setBusy(false); }
+  }
+
+  async function stopSending(chosen: Group[]) {
+    if (!chosen.length) return setMsg('Marque ao menos um grupo.');
+    setBusy(true); setMsg('');
+    try {
+      const r = await api.post('/api/whatsapp/channels/pause', { groupIds: chosen.map(g => g.id) });
+      setMsg(r.data.paused ? `Envio parado em ${r.data.paused} grupo(s). Ofertas que estavam na fila para eles não saem mais.` : 'Esses grupos já estavam sem envio.');
+      setPicked({});
+      onChanged();
+    } catch (e: any) { setMsg(e?.response?.data?.error || 'Desculpe, não consegui parar o envio. Tente de novo.'); }
     finally { setBusy(false); }
   }
 
@@ -101,18 +118,25 @@ export default function WhatsAppWeb({ onChanged }: { onChanged: () => void }) {
           </div>
           {groups.length ? (
             <>
-              <p className="muted" style={{ marginTop: 14 }}>{shown.length} grupo(s). Marque os que devem receber as ofertas:</p>
+              <p className="muted" style={{ marginTop: 14 }}>{shown.length} grupo(s). Ligue ou pare o envio de ofertas em cada grupo, ou marque vários e use os botões abaixo:</p>
               <div className="wa-groups">
                 {shown.map(g => (
                   <label className={`wa-group ${picked[g.id] ? 'on' : ''}`} key={g.id}>
                     <input type="checkbox" checked={!!picked[g.id]} onChange={e => setPicked(v => ({ ...v, [g.id]: e.target.checked }))} />
                     <span className="wa-group-name">{g.name}</span>
                     <small>{g.participants} membros</small>
+                    <span className={`badge ${sending(g) ? 'badge-on' : 'badge-off'}`}>{sending(g) ? 'Enviando' : 'Parado'}</span>
+                    <button
+                      className="outline wa-group-toggle" disabled={busy}
+                      title={sending(g) ? 'Parar de enviar ofertas neste grupo' : 'Enviar ofertas neste grupo'}
+                      onClick={e => { e.preventDefault(); if (sending(g)) stopSending([g]); else startSending([g]); }}
+                    >{sending(g) ? <Pause size={15} /> : <Play size={15} />}</button>
                   </label>
                 ))}
               </div>
               <div className="capture-actions">
-                <button className="primary" disabled={busy} onClick={addChannels}><Plus size={17} /> Adicionar selecionados como canais</button>
+                <button className="primary" disabled={busy} onClick={() => startSending(groups.filter(g => picked[g.id]))}><Play size={17} /> Enviar nos selecionados</button>
+                <button className="outline" disabled={busy} onClick={() => stopSending(groups.filter(g => picked[g.id]))}><Pause size={17} /> Parar envio nos selecionados</button>
                 <button className="outline" onClick={() => setPicked(Object.fromEntries(shown.map(g => [g.id, true])))}>Marcar todos</button>
                 <button className="outline" onClick={() => setPicked({})}>Desmarcar</button>
               </div>

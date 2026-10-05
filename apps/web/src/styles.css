@@ -392,12 +392,14 @@ button.danger:disabled{opacity:.45;cursor:not-allowed}
 .wa-connect .muted{max-width:520px}
 .wa-qr{width:280px;height:280px;border-radius:16px;border:1px solid var(--border);background:#fff;padding:8px}
 .wa-qr-wait{display:grid;place-items:center;color:var(--dim);font-weight:700;background:var(--surface-2)}
-.wa-groups{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin:12px 0 16px;max-height:420px;overflow:auto;padding-right:4px}
+.wa-groups{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;margin:12px 0 16px;max-height:420px;overflow:auto;padding-right:4px}
 .wa-group{display:flex;align-items:center;gap:12px;border:1px solid var(--border);border-radius:14px;padding:12px 14px;cursor:pointer;background:var(--surface-2);transition:border-color .15s,background .15s}
 .wa-group:hover{border-color:var(--border-strong)}
 .wa-group.on{border-color:var(--accent-border);background:var(--accent-soft)}
 .wa-group-name{flex:1;font-weight:700;color:var(--text);font-size:15px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wa-group small{color:var(--dim);flex:none;font-size:12.5px}
+.wa-group .badge{flex:none;padding:4px 10px}
+.wa-group-toggle{flex:none;padding:6px 8px;min-height:0}
 
 /* ---- login ---- */
 .auth-page{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(1200px 600px at 20% -10%,rgba(255,106,26,.18),transparent 60%),radial-gradient(900px 500px at 110% 110%,rgba(255,138,71,.12),transparent 60%),var(--bg)}

@@ -24,6 +24,11 @@ export async function executePromotionJob(jobId:string){
   // Idempotência: a fila tenta de novo quando a tentativa anterior lançou erro. Se o envio na verdade
   // saiu (a API marcou SENT ao entregar, mas a resposta se perdeu), não manda em dobro.
   if(job.status==='SENT') return;
+  // Canal pausado depois de o envio entrar na fila: não manda, e não lança erro para a fila não tentar de novo.
+  if(!job.channel.enabled){
+    await prisma.promotionJob.update({where:{id:jobId},data:{status:'FAILED',errorMessage:'Envio parado: o canal está pausado.'}}).catch(()=>{});
+    return;
+  }
   const payload:any=job.payloadJson||{}; await prisma.promotionJob.update({where:{id:jobId},data:{status:'PROCESSING',attempts:{increment:1}}});
   try{
     if(job.channel.type==='WHATSAPP') await sendWhatsAppText(job.channel.destination,payload.text||'');
