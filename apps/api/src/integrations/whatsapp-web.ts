@@ -70,23 +70,74 @@ function messageMedia(msg: any): WaMedia | null {
   return null;
 }
 
+// Manter conectado (pedido do usuário em 2026-10-06): qualquer queda tenta voltar sozinha, sem desistir,
+// com esperas que vão crescendo (2s, 5s, 10s, 30s e depois a cada 1 min).
+const RETRY_DELAYS = [2, 5, 10, 30, 60];
+let failures = 0;            // tentativas seguidas sem conseguir abrir a conexão
+let loggedOutStrikes = 0;    // vezes seguidas que o WhatsApp disse "sessão encerrada"
+let manualLogout = false;    // a pessoa clicou em Desconectar: aí não reconecta sozinho
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+const nextDelay = () => RETRY_DELAYS[Math.min(failures++, RETRY_DELAYS.length - 1)];
+
+function scheduleReconnect(sec: number, why: string) {
+  if (manualLogout || retryTimer) return;
+  status = 'connecting';
+  console.log(`[whatsapp] ${why} Tentando reconectar em ${sec}s.`);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (manualLogout || starting) return;
+    starting = start().catch(onStartError).finally(() => { starting = null; });
+  }, sec * 1000);
+}
+
+/** Não deu nem para abrir o socket (sem internet, por exemplo): tenta de novo mais tarde em vez de desistir. */
+function onStartError(e: any) {
+  sock = null;
+  lastError = e?.message || String(e);
+  status = 'disconnected';
+  scheduleReconnect(nextDelay(), `Falha ao conectar: ${lastError}.`);
+}
+
 export async function connectWhatsAppWeb(): Promise<void> {
-  if (status === 'connected' || status === 'qr' || status === 'connecting') return;
+  manualLogout = false;
+  // Pedido de conectar enquanto espera uma nova tentativa: tenta já.
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  else if (sock && status !== 'disconnected') return;
   if (starting) return starting;
-  starting = start().finally(() => { starting = null; });
+  starting = start().catch(onStartError).finally(() => { starting = null; });
   return starting;
+}
+
+// Vigia: se por algum motivo ficou desconectado com a sessão salva e sem nova tentativa marcada, reconecta.
+setInterval(() => {
+  if (!manualLogout && status === 'disconnected' && !retryTimer && !starting && hasSavedSession()) {
+    console.log('[whatsapp] Estava desconectado com a sessão salva; reconectando.');
+    connectWhatsAppWeb().catch(() => {});
+  }
+}, 60_000).unref();
+
+/** Guarda a sessão encerrada ao lado (em vez de apagar), para dar para investigar se precisar. */
+function archiveSession() {
+  const old = `${AUTH_DIR}-encerrada`;
+  try { fs.rmSync(old, { recursive: true, force: true }); fs.renameSync(AUTH_DIR, old); }
+  catch { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); }
 }
 
 async function start() {
   status = 'connecting';
-  lastError = null;
   qrDataUrl = null;
   fs.mkdirSync(AUTH_DIR, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
-  sock = makeWASocket({
+  // Nunca dois sockets com a mesma sessão: o WhatsApp derruba um deles ("conexão substituída").
+  const old = sock;
+  sock = null;
+  try { old?.end(undefined); } catch { /* já fechado */ }
+
+  const s = makeWASocket({
     version,
     auth: state,
     logger,
@@ -95,12 +146,13 @@ async function start() {
     syncFullHistory: false,
     markOnlineOnConnect: false
   });
+  sock = s;
 
-  sock.ev.on('creds.update', saveCreds);
+  s.ev.on('creds.update', saveCreds);
 
   // Mensagens novas no privado: quem quiser tratá-las se registra em onWhatsAppMessage.
-  sock.ev.on('messages.upsert', ({ messages, type }) => {
-    if (type !== 'notify' || !incomingHandlers.length) return;
+  s.ev.on('messages.upsert', ({ messages, type }) => {
+    if (sock !== s || type !== 'notify' || !incomingHandlers.length) return;
     for (const msg of messages) {
       const jid = msg.key?.remoteJid || '';
       // Só conversa individual: nada de grupo (@g.us), status (@broadcast) nem mensagem enviada por nós.
@@ -118,7 +170,9 @@ async function start() {
     }
   });
 
-  sock.ev.on('connection.update', async (u) => {
+  s.ev.on('connection.update', async (u) => {
+    // Evento de um socket antigo (já trocado por outro): ignora, senão derrubaria o atual.
+    if (sock !== s) return;
     if (u.qr) {
       status = 'qr';
       qrDataUrl = await QRCode.toDataURL(u.qr, { margin: 1, width: 280 });
@@ -126,41 +180,62 @@ async function start() {
     if (u.connection === 'open') {
       status = 'connected';
       qrDataUrl = null;
-      const id = sock?.user?.id || '';
-      me = { id: id.split(':')[0]?.replace('@s.whatsapp.net', '') || id, name: sock?.user?.name };
+      lastError = null;
+      failures = 0;
+      loggedOutStrikes = 0;
+      const id = s.user?.id || '';
+      me = { id: id.split(':')[0]?.replace('@s.whatsapp.net', '') || id, name: s.user?.name };
+      console.log(`[whatsapp] Conectado (+${me.id}).`);
     }
     if (u.connection === 'close') {
-      const code = (u.lastDisconnect?.error as any)?.output?.statusCode;
-      const loggedOut = code === DisconnectReason.loggedOut;
+      const err = u.lastDisconnect?.error as any;
+      const code = err?.output?.statusCode;
+      const wasQr = status === 'qr';
       sock = null;
       qrDataUrl = null;
-      if (loggedOut) {
-        // Sessão removida no celular: limpa as credenciais para permitir novo pareamento.
+      console.log(`[whatsapp] Conexão caiu (código ${code ?? '?'}${err?.message ? `: ${err.message}` : ''}).`);
+      if (manualLogout) { status = 'disconnected'; return; }
+      if (code === DisconnectReason.loggedOut) {
+        // Antes a sessão era apagada no primeiro aviso, e um aviso passageiro obrigava a escanear o QR de novo.
+        // Agora confere mais duas vezes; só se continuar encerrada é que pede o QR.
+        if (++loggedOutStrikes < 3) return scheduleReconnect(loggedOutStrikes * 15, 'O WhatsApp disse que a sessão foi encerrada; conferindo de novo.');
+        loggedOutStrikes = 0;
         status = 'disconnected';
         me = null;
-        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-        lastError = 'Sessão encerrada no celular. Conecte novamente.';
-      } else if (status !== 'disconnected') {
-        // Queda de rede ou reinício: tenta voltar sozinho.
-        status = 'connecting';
-        setTimeout(() => { start().catch(e => { lastError = e.message; status = 'disconnected'; }); }, 2000);
+        archiveSession();
+        lastError = 'O WhatsApp encerrou a sessão (o aparelho foi desconectado no celular ou o celular ficou muito tempo sem internet). Escaneie o QR code de novo em Canais.';
+        console.log(`[whatsapp] ${lastError}`);
+        return;
       }
+      // QR code expirou sem ninguém escanear (ainda não há sessão): para de gerar QR até clicarem em Conectar.
+      if (wasQr && !hasSavedSession()) {
+        status = 'disconnected';
+        lastError = 'O QR code expirou. Clique em Conectar para gerar outro.';
+        return;
+      }
+      if (code === DisconnectReason.restartRequired) return scheduleReconnect(1, 'O WhatsApp pediu para reiniciar a conexão.');
+      if (code === DisconnectReason.connectionReplaced) return scheduleReconnect(60, 'Outra conexão com a mesma sessão foi aberta (o sistema está aberto em dois lugares?).');
+      scheduleReconnect(nextDelay(), 'Queda de conexão.');
     }
   });
 }
 
 export async function logoutWhatsAppWeb() {
+  manualLogout = true;
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   const s = sock;
   status = 'disconnected';
   qrDataUrl = null;
   me = null;
+  lastError = null;
   sock = null;
   try { await s?.logout(); } catch { /* já desconectado */ }
   fs.rmSync(AUTH_DIR, { recursive: true, force: true });
 }
 
+/** Tem sessão pareada salva? (o creds.json só ganha o "me" depois que o QR code é escaneado). */
 export function hasSavedSession() {
-  return fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
+  try { return !!JSON.parse(fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf8'))?.me; } catch { return false; }
 }
 
 export async function listGroups(): Promise<WaGroup[]> {
