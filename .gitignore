@@ -4,6 +4,7 @@ dist/
 *.log
 .DS_Store
 .wa-auth/
+.wa-auth-encerrada/
 logs/
 backups/
 certs/
