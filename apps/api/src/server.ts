@@ -545,7 +545,7 @@ app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:an
 // Importação de contatos de um grupo para outro. Roda em segundo plano, em lotes pequenos
 // e com pausa entre eles: adicionar muita gente de uma vez é o jeito mais rápido de o número ser bloqueado.
 type GroupInvite={total:number;sent:number;failed:string[];running:boolean;error:string|null};
-type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;waitingConnection:boolean;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];failReasons:Record<string,string>;skippedBefore:number;noPhone:number;running:boolean;error:string|null;startedAt:string;finishedAt:string|null};
+type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;waitingConnection:boolean;warmingUntil?:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];failReasons:Record<string,string>;skippedBefore:number;noPhone:number;running:boolean;error:string|null;startedAt:string;finishedAt:string|null};
 // Uma importação por grupo de destino (pedido do usuário em 2026-10-06): começar outra para um grupo diferente
 // não pode apagar a que estava pela metade. Quem falta (rest) fica fora do job para não ir inteiro para a tela.
 type CopyEntry={job:GroupCopy;rest:string[];inviteText?:string};
@@ -664,10 +664,16 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
 }));
 
 const notConnected=(e:any)=>/não conectado/i.test(String(e?.message||e));
+// Adicionar gente logo depois de conectar é o que mais faz o WhatsApp remover o aparelho (aconteceu em 2026-10-06:
+// QR escaneado, 3 pessoas adicionadas e o aparelho removido segundos depois). Então espera a conexão firmar.
+const WARMUP_AFTER_PAIR=60*60_000;     // 1 h depois de escanear um QR code novo
+const WARMUP_AFTER_CONNECT=5*60_000;   // 5 min depois de uma reconexão comum
+const REMOVED_MSG='O WhatsApp removeu o aparelho enquanto esta importação rodava (sinal de que achou as adições rápidas demais). Pausei por segurança: espere algumas horas e continue com um limite por dia menor.';
 
 /** Adiciona em segundo plano quem falta em entry.rest. Limite do dia, lote e pausa são lidos do job a cada volta, porque podem mudar no meio. */
 function runGroupCopy(entry:CopyEntry){
   const job=entry.job;
+  const runStarted=Date.now();
   (async()=>{
     try{
       // Espera em fatias curtas para o "Parar" (e a troca do limite) responder logo.
@@ -681,13 +687,24 @@ function runGroupCopy(entry:CopyEntry){
           job.waitingUntil=null;
           continue;
         }
+        // O WhatsApp removeu o aparelho no meio desta importação: pausa e só volta quando a pessoa mandar.
+        const wa=getWaState();
+        if(wa.removedAt&&wa.removedAt>runStarted) throw new Error(REMOVED_MSG);
         // WhatsApp caiu: em vez de parar a importação, espera ele voltar e segue de onde estava.
-        if(getWaState().status!=='connected'){
+        if(wa.status!=='connected'){
           job.waitingConnection=true;
           await wait(60_000,()=>getWaState().status==='connected');
           continue;
         }
         job.waitingConnection=false;
+        // Conectou agora há pouco: espera a conexão firmar antes de adicionar alguém.
+        const ready=Math.max((wa.pairedAt||0)+WARMUP_AFTER_PAIR,(wa.connectedAt||0)+WARMUP_AFTER_CONNECT);
+        if(Date.now()<ready){
+          job.warmingUntil=new Date(ready).toISOString();
+          await wait(ready-Date.now(),()=>getWaState().status!=='connected');
+          job.warmingUntil=null;
+          continue;
+        }
         // Lote de tamanho variado (de 1 até o escolhido) para não ter um ritmo certinho de máquina.
         const size=1+Math.floor(Math.random()*job.batch);
         const batch=entry.rest.slice(0,Math.min(size,room));
@@ -724,7 +741,7 @@ function runGroupCopy(entry:CopyEntry){
       // Se a importação foi parada pela pessoa (ou deu erro e pode continuar), não manda — ela pode mandar pelo botão se quiser.
       // O convite já nasce "running" antes de a importação acabar, para a tela não parar de atualizar no meio.
       if(entry.inviteText&&job.privacy.length&&!job.stopped&&!job.error&&!job.invite) job.invite={total:job.privacy.length,sent:0,failed:[],running:true,error:null};
-      job.running=false; job.waitingUntil=null; job.waitingConnection=false; job.finishedAt=new Date().toISOString();
+      job.running=false; job.waitingUntil=null; job.waitingConnection=false; job.warmingUntil=null; job.finishedAt=new Date().toISOString();
       saveCopies();
     }
     if(job.invite?.running){
@@ -743,7 +760,7 @@ function runGroupCopy(entry:CopyEntry){
   for(const e of saved){
     if(!e?.job?.toId||!Array.isArray(e.rest)) continue;
     e.job.startedAt||=e.job.finishedAt||new Date().toISOString();
-    e.job.waitingUntil=null; e.job.waitingConnection=false;
+    e.job.waitingUntil=null; e.job.waitingConnection=false; e.job.warmingUntil=null;
     if(e.job.invite?.running) e.job.invite={...e.job.invite,running:false,error:'o sistema foi reiniciado no meio do envio.'};
     groupCopies.set(e.job.toId,e);
     if(e.job.running){

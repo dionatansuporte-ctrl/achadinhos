@@ -32,8 +32,19 @@ let me: { id: string; name?: string } | null = null;
 let lastError: string | null = null;
 let starting: Promise<void> | null = null;
 
+// Quando a conexão atual abriu, quando o QR code foi escaneado pela última vez (fica em disco, junto da sessão)
+// e quando o WhatsApp removeu o aparelho. A importação para grupos usa isso para não adicionar gente
+// logo depois de conectar — foi o que fez o WhatsApp remover o aparelho em 2026-10-06.
+let connectedAt: number | null = null;
+let removedAt: number | null = null;
+let sawQr = false;
+const PAIRED_FILE = path.join(AUTH_DIR, 'paired-at.txt');
+function pairedAt(): number | null {
+  try { return Number(fs.readFileSync(PAIRED_FILE, 'utf8')) || null; } catch { return null; }
+}
+
 export function getWaState() {
-  return { status, qr: qrDataUrl, me, error: lastError };
+  return { status, qr: qrDataUrl, me, error: lastError, connectedAt, pairedAt: pairedAt(), removedAt };
 }
 
 /** Mensagem de texto recebida no privado (grupos, status e as próprias mensagens ficam de fora). */
@@ -175,6 +186,7 @@ async function start() {
     if (sock !== s) return;
     if (u.qr) {
       status = 'qr';
+      sawQr = true;
       qrDataUrl = await QRCode.toDataURL(u.qr, { margin: 1, width: 280 });
     }
     if (u.connection === 'open') {
@@ -183,6 +195,10 @@ async function start() {
       lastError = null;
       failures = 0;
       loggedOutStrikes = 0;
+      connectedAt = Date.now();
+      // Abriu depois de mostrar QR: é um pareamento novo.
+      if (sawQr || !pairedAt()) { try { fs.writeFileSync(PAIRED_FILE, String(Date.now())); } catch { /* sem disco, segue */ } }
+      sawQr = false;
       const id = s.user?.id || '';
       me = { id: id.split(':')[0]?.replace('@s.whatsapp.net', '') || id, name: s.user?.name };
       console.log(`[whatsapp] Conectado (+${me.id}).`);
@@ -193,17 +209,23 @@ async function start() {
       const wasQr = status === 'qr';
       sock = null;
       qrDataUrl = null;
+      connectedAt = null;
       console.log(`[whatsapp] Conexão caiu (código ${code ?? '?'}${err?.message ? `: ${err.message}` : ''}).`);
       if (manualLogout) { status = 'disconnected'; return; }
       if (code === DisconnectReason.loggedOut) {
         // Antes a sessão era apagada no primeiro aviso, e um aviso passageiro obrigava a escanear o QR de novo.
         // Agora confere mais duas vezes; só se continuar encerrada é que pede o QR.
-        if (++loggedOutStrikes < 3) return scheduleReconnect(loggedOutStrikes * 15, 'O WhatsApp disse que a sessão foi encerrada; conferindo de novo.');
+        // "conflict" com 401 é o WhatsApp removendo o aparelho: aí não adianta conferir.
+        removedAt = Date.now();
+        const removed = /conflict/i.test(String(err?.message || ''));
+        if (!removed && ++loggedOutStrikes < 3) return scheduleReconnect(loggedOutStrikes * 15, 'O WhatsApp disse que a sessão foi encerrada; conferindo de novo.');
         loggedOutStrikes = 0;
         status = 'disconnected';
         me = null;
         archiveSession();
-        lastError = 'O WhatsApp encerrou a sessão (o aparelho foi desconectado no celular ou o celular ficou muito tempo sem internet). Escaneie o QR code de novo em Canais.';
+        lastError = removed
+          ? 'O próprio WhatsApp removeu o aparelho conectado. Isso costuma ser proteção contra spam (por exemplo, adicionar muita gente em grupo). Escaneie o QR code de novo em Canais e vá com calma nas importações.'
+          : 'O WhatsApp encerrou a sessão (o aparelho foi desconectado no celular ou o celular ficou muito tempo sem internet). Escaneie o QR code de novo em Canais.';
         console.log(`[whatsapp] ${lastError}`);
         return;
       }

@@ -4,7 +4,7 @@ import { api } from './api';
 
 type Group = { id: string; name: string; participants: number };
 type Invite = { total: number; sent: number; failed: string[]; running: boolean; error: string | null };
-type Copy = { fromName: string; toId: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; waitingConnection?: boolean; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null; left?: number };
+type Copy = { fromName: string; toId: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; waitingConnection?: boolean; warmingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null; left?: number };
 
 function downloadCsv(fileName: string, rows: string[][]) {
   // BOM para o Excel abrir os acentos certinho; ";" é o separador que o Excel em português espera.
@@ -267,7 +267,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
         <button className="outline" disabled={busy || !to} onClick={copyLink}><Link2 size={16} /> Copiar link do grupo</button>
       </div>
       <p className="hint">Hoje já foram adicionadas {addedToday} pessoa(s) (soma todas as importações do dia — o limite por dia vale para essa soma). Quando o limite do dia acaba, a importação espera a meia-noite e continua sozinha — o sistema precisa ficar ligado.</p>
-      <p className="hint">Dá para importar para vários grupos ao mesmo tempo: cada grupo de destino tem o seu quadro aqui embaixo, e uma não apaga a outra. Se o WhatsApp cair ou o sistema reiniciar, a importação espera e continua de onde parou.</p>
+      <p className="hint">Dá para importar para vários grupos ao mesmo tempo: cada grupo de destino tem o seu quadro aqui embaixo, e uma não apaga a outra. Se o WhatsApp cair ou o sistema reiniciar, a importação espera e continua de onde parou — mas só adiciona alguém 5 minutos depois de reconectar (1 hora depois de escanear um QR code novo). Se o WhatsApp remover o aparelho no meio, ela pausa e só volta quando você mandar.</p>
       <p className="hint">Para o WhatsApp não estranhar, a ordem é embaralhada e cada vez entra um número diferente de pessoas (até o que você escolheu), com esperas que variam um pouco. Quem o sistema já adicionou no grupo antes é pulado, mesmo que tenha saído.</p>
       <p className="hint">Só funciona se você for administrador do grupo de destino. Quem bloqueou ser adicionado por desconhecidos (privacidade) não entra direto — dá para mandar o link de convite no privado deles.</p>
       <label className="check-line">
@@ -292,6 +292,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
             <b>{copy.running ? 'Importando' : 'Importação'}: {copy.fromName} → {copy.toName}</b>
             {copy.running && <div>{copy.done} de {copy.total} ({pct}%)…{copy.batch && copy.pauseSec ? ` ${copy.batch} pessoa(s) a cada ${fmtPause(copy.pauseSec)}, faltam ${fmtPlan(copy.total - copy.done, copy.batch, copy.pauseSec, copy.dailyLimit || 1000, addedToday)}.` : ''}</div>}
             {copy.running && copy.waitingConnection && <div>⏸️ O WhatsApp está desconectado. A importação espera ele voltar e continua sozinha de onde parou.</div>}
+            {copy.running && copy.warmingUntil && <div>⏸️ O WhatsApp conectou agora há pouco. Para ele não desconfiar, a importação espera a conexão firmar e volta sozinha às {new Date(copy.warmingUntil).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.</div>}
             {copy.running && copy.waitingUntil && <div>⏸️ Limite de {copy.dailyLimit} por dia atingido. Continua sozinha {new Date(copy.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })} — ou aumente o limite aqui embaixo para continuar agora.</div>}
             {copy.running && (copy.stopped
               ? <div>Parando… o lote que já estava saindo termina e mais ninguém é adicionado.</div>
