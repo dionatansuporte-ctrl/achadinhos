@@ -209,11 +209,16 @@ export async function searchMercadoLivreOffers(s: MlSearch): Promise<ShopeeOffer
 
   // 2) metadados (nome, foto) só da página pedida
   let products: CatalogProduct[];
-  if (ids.length) {
+  if (from < ids.length) {
     const slice = ids.slice(from, from + fetchLimit);
     products = (await mapLimit(slice, 5, id => productMeta(token, id).catch(() => null))).filter((x): x is CatalogProduct => !!x);
   } else if (keyword) {
-    products = await searchCatalog(token, keyword, fetchLimit, from);
+    // Mais vendidos acabaram (são só ~20 por categoria): as páginas seguintes vêm do catálogo,
+    // senão uma automação de nicho esgota tudo em poucas horas e fica dias sem novidade.
+    // Pede 50 por página: no catálogo só uns 10 a 30% dos produtos têm anúncio ativo.
+    const firstCatalogPage = Math.ceil(ids.length / fetchLimit) + 1;
+    const seen = new Set(ids);
+    products = (await searchCatalog(token, keyword, 50, (page - firstCatalogPage) * 50)).filter(p => !seen.has(p.id));
   } else products = [];
   if (!products.length) return [];
 

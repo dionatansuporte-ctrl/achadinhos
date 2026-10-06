@@ -151,11 +151,12 @@ async function runAutomationNow(automationId: string, opts: { source: 'manual' |
   // Novos (nunca enviados) primeiro; repetidos só completam a cota, do mais antigo para o mais recente.
   const fresh_: any[] = [];
   const repeats: any[] = [];
+  const recent: any[] = []; // enviados há menos de repeatAfterDays: último recurso para não ficar sem envio
   let skipped = 0;
   let skippedTitle = 0; // dos pulados, quantos eram o mesmo produto em outro anúncio (título igual)
   const consider = (p: any) => {
     if (!matchesRules(p, rules)) return;
-    if (!pendingChannels(p).length) { skipped++; if (blockedOnlyByTitle(p)) skippedTitle++; return; }
+    if (!pendingChannels(p).length) { skipped++; if (blockedOnlyByTitle(p)) skippedTitle++; recent.push(p); return; }
     (isRepeat(p) ? repeats : fresh_).push(p);
   };
   const titleNote = () => skippedTitle ? ` (${skippedTitle} por título igual em outro anúncio)` : '';
@@ -190,6 +191,15 @@ async function runAutomationNow(automationId: string, opts: { source: 'manual' |
 
   repeats.sort((x, y) => oldestSend(x) - oldestSend(y));
   const candidates = [...fresh_, ...repeats];
+  // Nada novo nem liberado para repetir: em vez de ficar em silêncio, reenvia o que saiu há mais tempo
+  // (só para grupos onde ele não está na fila). Com "nunca repetir" (0 dias) continua quieto.
+  const forced = new Set<any>();
+  const sentChannels = (p: any) => channels.filter(c => isFinite(lastSentAt(p, c.id) ?? Infinity));
+  if (!candidates.length && repeatAfterDays > 0) {
+    const lastAny = (p: any) => Math.max(...sentChannels(p).map(c => lastSentAt(p, c.id)!));
+    recent.filter(p => sentChannels(p).length).sort((x, y) => lastAny(x) - lastAny(y))
+      .slice(0, perRun ?? 1).forEach(p => { forced.add(p); candidates.push(p); });
+  }
   const chosen = candidates.slice(0, wanted);
   const repeated = chosen.filter(p => isRepeat(p)).length;
   // Cupons cadastrados marcados "também nas mensagens de produto"; o cupom próprio do produto tem prioridade.
@@ -204,7 +214,7 @@ async function runAutomationNow(automationId: string, opts: { source: 'manual' |
       couponText: p.couponText || pickCoupon(coupons, p),
       affiliateUrl: p.affiliateUrl
     });
-    for (const c of pendingChannels(p)) {
+    for (const c of forced.has(p) ? sentChannels(p) : pendingChannels(p)) {
       const job = await prisma.promotionJob.create({ data: { automationId: a.id, productId: p.id, channelId: c.id, scheduledAt: new Date(), payloadJson: { title: p.title, text, affiliateUrl: p.affiliateUrl, imageUrl: p.imageUrl } } });
       rememberSent(p, c.id, Infinity); // evita mandar o "mesmo" produto de novo nesta rodada
       jobs++;
@@ -212,8 +222,10 @@ async function runAutomationNow(automationId: string, opts: { source: 'manual' |
   }
 
   const repeatNote = repeatAfterDays ? `há menos de ${repeatAfterDays} dia(s)` : 'antes (repetição desligada)';
-  const message = jobs
-    ? `${chosen.length} produto(s) → ${jobs} envio(s) em ${channels.length} grupo(s).${repeated ? ` ${repeated} repetido(s) após ${repeatAfterDays} dia(s), com dados atualizados.` : ''}${skipped ? ` ${skipped} produto(s) enviados ${repeatNote} foram pulados${titleNote()}.` : ''}`
+  const message = jobs && forced.size
+    ? `Nada novo na busca: para não ficar sem envio, ${forced.size} produto(s) enviado(s) há mais tempo saíram de novo, com dados atualizados → ${jobs} envio(s).`
+    : jobs
+    ? `${chosen.length} produto(s) → ${jobs} envio(s) em ${channels.length} grupo(s).${repeated ?` ${repeated} repetido(s) após ${repeatAfterDays} dia(s), com dados atualizados.` : ''}${skipped ? ` ${skipped} produto(s) enviados ${repeatNote} foram pulados${titleNote()}.` : ''}`
     : skipped
       ? `Nada novo: todos os ${skipped} produto(s) encontrados já foram enviados ${repeatNote} para esses grupos${titleNote()}.`
       : 'Nenhum produto atende às regras desta automação.';
