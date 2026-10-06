@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Download, FileUp, Link2, Play, Send, Square, UserPlus, Users } from 'lucide-react';
+import { Download, FileUp, Link2, Play, Send, Square, UserPlus, Users, X } from 'lucide-react';
 import { api } from './api';
 
 type Group = { id: string; name: string; participants: number };
 type Invite = { total: number; sent: number; failed: string[]; running: boolean; error: string | null };
-type Copy = { fromName: string; toId?: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null; left?: number };
+type Copy = { fromName: string; toId: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; waitingConnection?: boolean; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null; left?: number };
 
 function downloadCsv(fileName: string, rows: string[][]) {
   // BOM para o Excel abrir os acentos certinho; ";" é o separador que o Excel em português espera.
@@ -63,13 +63,16 @@ function parsePhones(text: string) {
 // {grupo} e {link} são trocados pelo servidor na hora de mandar.
 const DEFAULT_INVITE = 'Oi, tudo bem? 😊 Tentei te adicionar no grupo *{grupo}*, mas a privacidade do seu WhatsApp não deixou. Se quiser entrar e receber as ofertas, é só tocar no link:\n{link}\n\nQualquer dúvida, estou por aqui!';
 
+const leftOf = (c: Copy) => c.left ?? c.total - c.done;
+
 /** Extrai os contatos de um grupo em planilha ou adiciona os membros de um grupo em outro. */
 export default function GroupContacts({ groups }: { groups: Group[] }) {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
-  const [copy, setCopy] = useState<Copy | null>(null);
+  // Uma importação por grupo de destino; várias podem rodar ao mesmo tempo.
+  const [copies, setCopies] = useState<Copy[]>([]);
   const [batch, setBatch] = useState(5);
   const [pauseSec, setPauseSec] = useState(30);
   const [dailyLimit, setDailyLimit] = useState(50);
@@ -78,11 +81,12 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
   const [autoInvite, setAutoInvite] = useState(true);
   const [file, setFile] = useState<File | null>(null);
 
-  // Sem importação, a API devolve só a contagem do dia ({ none: true, addedToday }).
-  const loadCopy = () => api.get('/api/whatsapp/groups/copy').then(r => { setAddedToday(r.data?.addedToday || 0); setCopy(r.data && !r.data.none ? r.data : null); }).catch(() => {});
+  // A API devolve todas as importações ({ jobs, addedToday }).
+  const applyCopies = (data: any) => { setAddedToday(data?.addedToday || 0); setCopies(Array.isArray(data?.jobs) ? data.jobs : []); };
+  const loadCopy = () => api.get('/api/whatsapp/groups/copy').then(r => applyCopies(r.data)).catch(() => {});
   useEffect(() => { loadCopy(); }, []);
-  // Enquanto a importação ou os convites rodam, atualiza o progresso a cada 5s.
-  const working = !!copy?.running || !!copy?.invite?.running;
+  // Enquanto alguma importação ou convite roda, atualiza o progresso a cada 5s.
+  const working = copies.some(c => c.running || c.invite?.running);
   useEffect(() => {
     if (!working) return;
     const t = window.setInterval(loadCopy, 5000);
@@ -105,54 +109,63 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     finally { setBusy(false); }
   }
 
-  async function stopCopy() {
-    if (!confirm('Parar a importação? Quem já entrou continua no grupo.')) return;
+  async function stopCopy(copy: Copy) {
+    if (!confirm(`Parar a importação para "${copy.toName}"? Quem já entrou continua no grupo.`)) return;
     setBusy(true);
-    try { const r = await api.post('/api/whatsapp/groups/copy/stop'); setCopy(r.data); }
+    try { const r = await api.post('/api/whatsapp/groups/copy/stop', { to: copy.toId }); applyCopies(r.data); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível parar a importação.'); }
     finally { setBusy(false); }
   }
 
-  // Limite por dia digitado no quadro da importação (null = ainda é o da própria importação).
-  const [jobLimit, setJobLimit] = useState<number | null>(null);
+  // Limite por dia digitado no quadro de cada importação, por grupo de destino (sem valor = ainda é o da própria importação).
+  const [jobLimits, setJobLimits] = useState<Record<string, number>>({});
+  const setJobLimit = (toId: string, n: number | null) => setJobLimits(m => { const c = { ...m }; if (n == null) delete c[toId]; else c[toId] = n; return c; });
   const cleanLimit = (n: number) => Math.min(1000, Math.max(1, Math.round(n) || 50));
 
-  /** Troca o limite por dia da importação que está rodando; se ela esperava a meia-noite e o limite novo deixa espaço, volta na hora. */
-  async function changeLimit() {
-    if (!copy || jobLimit == null) return;
+  /** Troca o limite por dia de uma importação que está rodando; se ela esperava a meia-noite e o limite novo deixa espaço, volta na hora. */
+  async function changeLimit(copy: Copy) {
+    const jobLimit = jobLimits[copy.toId];
+    if (jobLimit == null) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy/settings', { dailyLimit: cleanLimit(jobLimit) }); setCopy(r.data); setAddedToday(r.data.addedToday || 0); setJobLimit(null); }
+    try { const r = await api.post('/api/whatsapp/groups/copy/settings', { to: copy.toId, dailyLimit: cleanLimit(jobLimit) }); applyCopies(r.data); setJobLimit(copy.toId, null); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível mudar o limite.'); }
     finally { setBusy(false); }
   }
 
-  /** Continua de onde parou uma importação parada, com o limite por dia escolhido no quadro. */
-  async function resumeCopy() {
-    if (!copy) return;
-    const limit = cleanLimit(jobLimit ?? copy.dailyLimit ?? dailyLimit);
-    const left = copy.left ?? copy.total - copy.done;
+  /** Continua de onde parou uma importação parada, com o limite por dia escolhido no quadro dela. */
+  async function resumeCopy(copy: Copy) {
+    const limit = cleanLimit(jobLimits[copy.toId] ?? copy.dailyLimit ?? dailyLimit);
+    const left = leftOf(copy);
     if (!confirm(`Continuar a importação para "${copy.toName}" de onde parou?\n\nFaltam ${left} pessoa(s). Com limite de ${limit} por dia, leva ${fmtPlan(left, copy.batch || batch, copy.pauseSec || pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy/resume', { dailyLimit: limit }); setCopy(r.data); setAddedToday(r.data.addedToday || 0); setJobLimit(null); }
+    try { const r = await api.post('/api/whatsapp/groups/copy/resume', { to: copy.toId, dailyLimit: limit }); applyCopies(r.data); setJobLimit(copy.toId, null); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível continuar a importação.'); }
     finally { setBusy(false); }
   }
 
-  async function sendInvites() {
-    if (!copy) return;
-    if (!inviteText.includes('{link}')) return setMsg('A mensagem precisa ter {link} no lugar do link do grupo.');
-    if (!confirm(`Mandar o convite no privado para ${copy.privacy.length} pessoa(s)?\n\nVai uma mensagem de cada vez, com uns 30 segundos entre elas, para proteger o número.`)) return;
+  /** Tira da lista uma importação que já terminou ou foi parada. */
+  async function dismissCopy(copy: Copy) {
+    const left = leftOf(copy);
+    if (!confirm(`Tirar da lista a importação para "${copy.toName}"?${left > 0 ? `\n\nAinda faltavam ${left} pessoa(s) — elas não vão mais ser adicionadas.` : ''}`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy/invite', { text: inviteText }); setCopy(r.data); }
+    try { const r = await api.delete(`/api/whatsapp/groups/copy/${encodeURIComponent(copy.toId)}`); applyCopies(r.data); }
+    catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível tirar a importação da lista.'); }
+    finally { setBusy(false); }
+  }
+
+  async function sendInvites(copy: Copy) {
+    if (!inviteText.includes('{link}')) return setMsg('A mensagem precisa ter {link} no lugar do link do grupo.');
+    if (!confirm(`Mandar o convite de "${copy.toName}" no privado para ${copy.privacy.length} pessoa(s)?\n\nVai uma mensagem de cada vez, com uns 30 segundos entre elas, para proteger o número.`)) return;
+    setBusy(true); setMsg('');
+    try { const r = await api.post('/api/whatsapp/groups/copy/invite', { to: copy.toId, text: inviteText }); applyCopies(r.data); }
     catch (e: any) { setMsg(e?.response?.data?.error || e?.response?.data?.issues?.[0]?.message || 'Não foi possível mandar os convites.'); }
     finally { setBusy(false); }
   }
 
-  async function downloadLeftOut() {
-    if (!copy) return;
+  async function downloadLeftOut(copy: Copy) {
     // Tenta pôr o link na planilha para facilitar mandar à mão; se não der, baixa sem ele.
     let link = '';
-    if (copy.toId) { try { link = await inviteLink(copy.toId); } catch {} }
+    try { link = await inviteLink(copy.toId); } catch {}
     downloadCsv(`nao adicionados - ${safeName(copy.toName)}.csv`, [
       ['Telefone', 'Motivo', 'Link do grupo'],
       ...copy.privacy.map(p => [`+${p}`, 'privacidade (mandar convite)', link]),
@@ -173,16 +186,24 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     finally { setBusy(false); }
   }
 
+  /** Já existe uma importação parada pela metade para este destino? A nova substitui ela (e pula quem ela já adicionou). */
+  function okToReplace() {
+    const old = copies.find(c => c.toId === to);
+    const left = old ? leftOf(old) : 0;
+    return !old || left <= 0 || confirm(`O grupo "${old.toName}" já tem uma importação parada (${old.fromName}) com ${left} pessoa(s) faltando.\n\nSe começar uma nova para este grupo, aquela sai da lista (quem ela já adicionou continua sendo pulado). Quer seguir?\n\nPara só retomar a antiga, cancele e use "Continuar de onde parou" no quadro dela.`);
+  }
+
   async function importTo() {
     if (!from || !to) return setMsg('Escolha o grupo de origem e o de destino.');
     if (autoInvite && !inviteText.includes('{link}')) return setMsg('A mensagem do convite precisa ter {link} no lugar do link do grupo.');
     if (from === to) return setMsg('Escolha grupos diferentes.');
+    if (!okToReplace()) return;
     const src = groups.find(g => g.id === from), d = groups.find(g => g.id === to)?.name;
     const size = Math.min(20, Math.max(1, Math.round(batch) || 5));
     const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
     if (!confirm(`Adicionar os membros de "${src?.name}" no grupo "${d}"?\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — com ${src?.participants || 0} membros, leva ${fmtPlan(src?.participants || 0, size, pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy', { from, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined }); setCopy(r.data); }
+    try { const r = await api.post('/api/whatsapp/groups/copy', { from, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined }); applyCopies(r.data); setJobLimit(to, null); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a importação.'); }
     finally { setBusy(false); }
   }
@@ -193,17 +214,19 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     if (autoInvite && !inviteText.includes('{link}')) return setMsg('A mensagem do convite precisa ter {link} no lugar do link do grupo.');
     const { phones, skipped } = parsePhones(await file.text());
     if (!phones.length) return setMsg('Não achei nenhum telefone no arquivo. Coloque um número por linha, com DDD (ex.: 11 91234-5678).');
+    if (!okToReplace()) return;
     const d = groups.find(g => g.id === to)?.name;
     const size = Math.min(20, Math.max(1, Math.round(batch) || 5));
     const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
     if (!confirm(`Adicionar ${phones.length} telefone(s) do arquivo "${file.name}" no grupo "${d}"?${skipped ? `\n(${skipped} linha(s) sem telefone válido foram ignoradas.)` : ''}\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — leva ${fmtPlan(phones.length, size, pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy', { phones, fileName: file.name, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined }); setCopy(r.data); }
+    try { const r = await api.post('/api/whatsapp/groups/copy', { phones, fileName: file.name, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined }); applyCopies(r.data); setJobLimit(to, null); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a importação.'); }
     finally { setBusy(false); }
   }
 
-  const pct = copy && copy.total ? Math.round((copy.done / copy.total) * 100) : 100;
+  // Só o grupo de destino escolhido é que não pode ter duas importações rodando juntas.
+  const destBusy = copies.some(c => c.toId === to && (c.running || c.invite?.running));
 
   return (
     <div style={{ marginTop: 22 }}>
@@ -221,12 +244,13 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
           <option value="">Grupo de destino</option>
           {groups.filter(g => g.id !== from).map(g => <option key={g.id} value={g.id}>{g.name} ({g.participants})</option>)}
         </select>
-        <button className="primary" disabled={busy || !from || !to || !!copy?.running} onClick={importTo}><UserPlus size={16} /> Importar para o destino</button>
+        <button className="primary" disabled={busy || !from || !to || destBusy} onClick={importTo}><UserPlus size={16} /> Importar para o destino</button>
       </div>
       <div className="form-row form-row-tight">
         <input type="file" accept=".csv,.txt,text/csv,text/plain" onChange={e => setFile(e.target.files?.[0] || null)} />
-        <button className="primary" disabled={busy || !file || !to || !!copy?.running} onClick={importFile}><FileUp size={16} /> Importar arquivo para o destino</button>
+        <button className="primary" disabled={busy || !file || !to || destBusy} onClick={importFile}><FileUp size={16} /> Importar arquivo para o destino</button>
       </div>
+      {destBusy && <p className="hint">Esse grupo de destino já tem uma importação rodando (veja o quadro dela aqui embaixo). Para importar ao mesmo tempo, escolha outro grupo.</p>}
       <p className="hint">O arquivo pode ser a planilha baixada em "Extrair contatos" ou um CSV/TXT com um telefone por linha, com DDD. Sem o 55 na frente, entende como número do Brasil.</p>
       <div className="form-row form-row-tight">
         <label>Até quantas pessoas por vez
@@ -242,7 +266,8 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
         </label>
         <button className="outline" disabled={busy || !to} onClick={copyLink}><Link2 size={16} /> Copiar link do grupo</button>
       </div>
-      <p className="hint">Hoje já foram adicionadas {addedToday} pessoa(s) (soma todas as importações do dia). Quando o limite do dia acaba, a importação espera a meia-noite e continua sozinha — o sistema precisa ficar ligado.</p>
+      <p className="hint">Hoje já foram adicionadas {addedToday} pessoa(s) (soma todas as importações do dia — o limite por dia vale para essa soma). Quando o limite do dia acaba, a importação espera a meia-noite e continua sozinha — o sistema precisa ficar ligado.</p>
+      <p className="hint">Dá para importar para vários grupos ao mesmo tempo: cada grupo de destino tem o seu quadro aqui embaixo, e uma não apaga a outra. Se o WhatsApp cair ou o sistema reiniciar, a importação espera e continua de onde parou.</p>
       <p className="hint">Para o WhatsApp não estranhar, a ordem é embaralhada e cada vez entra um número diferente de pessoas (até o que você escolheu), com esperas que variam um pouco. Quem o sistema já adicionou no grupo antes é pulado, mesmo que tenha saído.</p>
       <p className="hint">Só funciona se você for administrador do grupo de destino. Quem bloqueou ser adicionado por desconhecidos (privacidade) não entra direto — dá para mandar o link de convite no privado deles.</p>
       <label className="check-line">
@@ -258,65 +283,74 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
         </>
       )}
 
-      {copy && (
-        <div className="inline-msg">
-          <b>{copy.running ? 'Importando' : 'Importação'}: {copy.fromName} → {copy.toName}</b>
-          {copy.running && <div>{copy.done} de {copy.total} ({pct}%)…{copy.batch && copy.pauseSec ? ` ${copy.batch} pessoa(s) a cada ${fmtPause(copy.pauseSec)}, faltam ${fmtPlan(copy.total - copy.done, copy.batch, copy.pauseSec, copy.dailyLimit || 1000, addedToday)}.` : ''}</div>}
-          {copy.running && copy.waitingUntil && <div>⏸️ Limite de {copy.dailyLimit} por dia atingido. Continua sozinha {new Date(copy.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })} — ou aumente o limite aqui embaixo para continuar agora.</div>}
-          {copy.running && (copy.stopped
-            ? <div>Parando… o lote que já estava saindo termina e mais ninguém é adicionado.</div>
-            : <button className="outline" style={{ marginTop: 8 }} disabled={busy} onClick={stopCopy}><Square size={16} /> Parar importação</button>)}
-          {!copy.running && copy.stopped && <div>Importação parada por você.</div>}
-          {copy.running && !copy.stopped && (
-            <div className="form-row form-row-tight" style={{ marginTop: 8 }}>
-              <label>Limite por dia desta importação
-                <input type="number" min={1} max={1000} value={jobLimit ?? copy.dailyLimit ?? ''} onChange={e => setJobLimit(Number(e.target.value))} />
-              </label>
-              <button className="outline" disabled={busy || jobLimit == null || jobLimit === copy.dailyLimit} onClick={changeLimit}>Mudar limite</button>
-            </div>
-          )}
-          {!copy.running && !copy.invite?.running && (copy.left ?? copy.total - copy.done) > 0 && (
-            <div style={{ marginTop: 8 }}>
-              <div>Faltam {copy.left ?? copy.total - copy.done} pessoa(s) para adicionar. Hoje já entraram {addedToday}; escolha o limite por dia e continue de onde parou.</div>
-              <div className="form-row form-row-tight">
-                <label>Limite por dia
-                  <input type="number" min={1} max={1000} value={jobLimit ?? copy.dailyLimit ?? dailyLimit} onChange={e => setJobLimit(Number(e.target.value))} />
+      {copies.map(copy => {
+        const pct = copy.total ? Math.round((copy.done / copy.total) * 100) : 100;
+        const left = leftOf(copy);
+        const jobLimit = jobLimits[copy.toId];
+        return (
+          <div className="inline-msg" key={copy.toId}>
+            <b>{copy.running ? 'Importando' : 'Importação'}: {copy.fromName} → {copy.toName}</b>
+            {copy.running && <div>{copy.done} de {copy.total} ({pct}%)…{copy.batch && copy.pauseSec ? ` ${copy.batch} pessoa(s) a cada ${fmtPause(copy.pauseSec)}, faltam ${fmtPlan(copy.total - copy.done, copy.batch, copy.pauseSec, copy.dailyLimit || 1000, addedToday)}.` : ''}</div>}
+            {copy.running && copy.waitingConnection && <div>⏸️ O WhatsApp está desconectado. A importação espera ele voltar e continua sozinha de onde parou.</div>}
+            {copy.running && copy.waitingUntil && <div>⏸️ Limite de {copy.dailyLimit} por dia atingido. Continua sozinha {new Date(copy.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })} — ou aumente o limite aqui embaixo para continuar agora.</div>}
+            {copy.running && (copy.stopped
+              ? <div>Parando… o lote que já estava saindo termina e mais ninguém é adicionado.</div>
+              : <button className="outline" style={{ marginTop: 8 }} disabled={busy} onClick={() => stopCopy(copy)}><Square size={16} /> Parar importação</button>)}
+            {!copy.running && copy.stopped && <div>Importação parada por você.</div>}
+            {copy.running && !copy.stopped && (
+              <div className="form-row form-row-tight" style={{ marginTop: 8 }}>
+                <label>Limite por dia desta importação
+                  <input type="number" min={1} max={1000} value={jobLimit ?? copy.dailyLimit ?? ''} onChange={e => setJobLimit(copy.toId, Number(e.target.value))} />
                 </label>
-                <button className="primary" disabled={busy} onClick={resumeCopy}><Play size={16} /> Continuar de onde parou</button>
+                <button className="outline" disabled={busy || jobLimit == null || jobLimit === copy.dailyLimit} onClick={() => changeLimit(copy)}>Mudar limite</button>
               </div>
-            </div>
-          )}
-          <div>{copy.added} adicionado(s) · {copy.already} já estavam no grupo{copy.skippedBefore ? ` · ${copy.skippedBefore} pulados (o sistema já tinha adicionado antes)` : ''}{copy.privacy.length ? ` · ${copy.privacy.length} bloqueados pela privacidade` : ''}{copy.failed.length ? ` · ${copy.failed.length} com erro` : ''}{copy.noPhone ? ` · ${copy.noPhone} com número oculto` : ''}</div>
-          {copy.failed.length > 0 && (
-            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
-              {copy.failed.slice(0, 20).map(p => <li key={p}>+{p}: {copy.failReasons?.[p] || 'erro (motivo não registrado)'}</li>)}
-              {copy.failed.length > 20 && <li>e mais {copy.failed.length - 20} — veja todos em "Baixar os que não entraram".</li>}
-            </ul>
-          )}
-          {copy.error && <div>Ops, a importação parou: {copy.error}</div>}
-          {!copy.running && (copy.privacy.length + copy.failed.length) > 0 && (
-            <button className="outline" style={{ marginTop: 8 }} onClick={downloadLeftOut}>
-              <Download size={16} /> Baixar os que não entraram
-            </button>
-          )}
-          {copy.invite && (
-            <div style={{ marginTop: 8 }}>
-              <b>Convites no privado:</b> {copy.invite.sent} de {copy.invite.total} enviado(s){copy.invite.failed.length ? ` · ${copy.invite.failed.length} com erro` : ''}{copy.invite.running ? '…' : '.'}
-              {copy.invite.error && <div>Ops, o envio parou: {copy.invite.error}</div>}
-            </div>
-          )}
-          {!copy.running && copy.privacy.length > 0 && !copy.invite?.running && (!copy.autoInvite || copy.invite || copy.stopped) && (
-            <div style={{ marginTop: 10 }}>
-              <label>Mensagem do convite (use {'{grupo}'} e {'{link}'})
-                <textarea rows={5} value={inviteText} onChange={e => setInviteText(e.target.value)} />
-              </label>
-              <button className="primary" style={{ marginTop: 8 }} disabled={busy} onClick={sendInvites}>
-                <Send size={16} /> {copy.invite ? 'Mandar convite de novo' : 'Mandar convite no privado'} ({copy.privacy.length})
+            )}
+            {!copy.running && !copy.invite?.running && left > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <div>Faltam {left} pessoa(s) para adicionar. Hoje já entraram {addedToday}; escolha o limite por dia e continue de onde parou.</div>
+                <div className="form-row form-row-tight">
+                  <label>Limite por dia
+                    <input type="number" min={1} max={1000} value={jobLimit ?? copy.dailyLimit ?? dailyLimit} onChange={e => setJobLimit(copy.toId, Number(e.target.value))} />
+                  </label>
+                  <button className="primary" disabled={busy} onClick={() => resumeCopy(copy)}><Play size={16} /> Continuar de onde parou</button>
+                </div>
+              </div>
+            )}
+            <div>{copy.added} adicionado(s) · {copy.already} já estavam no grupo{copy.skippedBefore ? ` · ${copy.skippedBefore} pulados (o sistema já tinha adicionado antes)` : ''}{copy.privacy.length ? ` · ${copy.privacy.length} bloqueados pela privacidade` : ''}{copy.failed.length ? ` · ${copy.failed.length} com erro` : ''}{copy.noPhone ? ` · ${copy.noPhone} com número oculto` : ''}</div>
+            {copy.failed.length > 0 && (
+              <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                {copy.failed.slice(0, 20).map(p => <li key={p}>+{p}: {copy.failReasons?.[p] || 'erro (motivo não registrado)'}</li>)}
+                {copy.failed.length > 20 && <li>e mais {copy.failed.length - 20} — veja todos em "Baixar os que não entraram".</li>}
+              </ul>
+            )}
+            {copy.error && <div>Ops, a importação parou: {copy.error}</div>}
+            {!copy.running && (copy.privacy.length + copy.failed.length) > 0 && (
+              <button className="outline" style={{ marginTop: 8, marginRight: 8 }} onClick={() => downloadLeftOut(copy)}>
+                <Download size={16} /> Baixar os que não entraram
               </button>
-            </div>
-          )}
-        </div>
-      )}
+            )}
+            {!copy.running && !copy.invite?.running && (
+              <button className="outline" style={{ marginTop: 8 }} disabled={busy} onClick={() => dismissCopy(copy)}><X size={16} /> Tirar da lista</button>
+            )}
+            {copy.invite && (
+              <div style={{ marginTop: 8 }}>
+                <b>Convites no privado:</b> {copy.invite.sent} de {copy.invite.total} enviado(s){copy.invite.failed.length ? ` · ${copy.invite.failed.length} com erro` : ''}{copy.invite.running ? '…' : '.'}
+                {copy.invite.error && <div>Ops, o envio parou: {copy.invite.error}</div>}
+              </div>
+            )}
+            {!copy.running && copy.privacy.length > 0 && !copy.invite?.running && (!copy.autoInvite || copy.invite || copy.stopped) && (
+              <div style={{ marginTop: 10 }}>
+                <label>Mensagem do convite (use {'{grupo}'} e {'{link}'})
+                  <textarea rows={5} value={inviteText} onChange={e => setInviteText(e.target.value)} />
+                </label>
+                <button className="primary" style={{ marginTop: 8 }} disabled={busy} onClick={() => sendInvites(copy)}>
+                  <Send size={16} /> {copy.invite ? 'Mandar convite de novo' : 'Mandar convite no privado'} ({copy.privacy.length})
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
       {msg && <p className="inline-msg">{msg}</p>}
     </div>
   );

@@ -545,11 +545,16 @@ app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:an
 // Importação de contatos de um grupo para outro. Roda em segundo plano, em lotes pequenos
 // e com pausa entre eles: adicionar muita gente de uma vez é o jeito mais rápido de o número ser bloqueado.
 type GroupInvite={total:number;sent:number;failed:string[];running:boolean;error:string|null};
-type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];failReasons:Record<string,string>;skippedBefore:number;noPhone:number;running:boolean;error:string|null;finishedAt:string|null};
-let groupCopy:GroupCopy|null=null;
-// Quem ainda falta adicionar na importação atual (fica fora do GroupCopy para não ir inteiro para a tela) e o convite automático dela.
-let groupCopyRest:string[]=[];
-let groupCopyInviteText:string|undefined;
+type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;waitingConnection:boolean;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];failReasons:Record<string,string>;skippedBefore:number;noPhone:number;running:boolean;error:string|null;startedAt:string;finishedAt:string|null};
+// Uma importação por grupo de destino (pedido do usuário em 2026-10-06): começar outra para um grupo diferente
+// não pode apagar a que estava pela metade. Quem falta (rest) fica fora do job para não ir inteiro para a tela.
+type CopyEntry={job:GroupCopy;rest:string[];inviteText?:string};
+const groupCopies=new Map<string,CopyEntry>();
+// Ficam em disco para sobreviver a um reinício do sistema (senão as pessoas que faltavam se perdiam).
+const COPIES_FILE=path.resolve(__dirname,'../.cache/group-copies.json');
+function saveCopies(){
+  try{ fs.mkdirSync(path.dirname(COPIES_FILE),{recursive:true}); fs.writeFileSync(COPIES_FILE,JSON.stringify([...groupCopies.values()])); }catch{}
+}
 
 // Limite de pessoas adicionadas por dia (pedido do usuário em 2026-10-04). A contagem soma todas as
 // importações do dia e fica em disco, para valer mesmo se o sistema reiniciar. Tentativa conta
@@ -577,36 +582,52 @@ function shuffle<T>(list:T[]){ const a=[...list]; for(let i=a.length-1;i>0;i--){
 /** Meia-noite de amanhã no horário de Brasília (o Brasil não tem horário de verão desde 2019: UTC-3). */
 function nextSpMidnight(){ const [y,m,d]=spDay().split('-').map(Number); return new Date(Date.UTC(y,m-1,d+1,3,0,5)); }
 
-// O que a tela recebe: a importação atual, quantos ainda faltam (left) e quantos já entraram hoje.
-const copyPayload=()=>groupCopy?{...groupCopy,left:groupCopyRest.length,addedToday:addsToday()}:{addedToday:addsToday(),none:true};
+// O que a tela recebe: todas as importações (a mais nova primeiro), quantos ainda faltam em cada uma (left) e quantos já entraram hoje.
+const entryPayload=(e:CopyEntry)=>({...e.job,left:e.rest.length});
+const copyPayload=()=>({addedToday:addsToday(),jobs:[...groupCopies.values()].sort((a,b)=>b.job.startedAt.localeCompare(a.job.startedAt)).map(entryPayload)});
+/** A importação do grupo de destino que a tela mandou (campo "to"), ou responde o erro. */
+function copyEntry(req:any,res:any){
+  const e=groupCopies.get(String(req.body?.to||req.params?.to||''));
+  if(!e) res.status(404).json({error:'Não achei essa importação. Atualize a página.'});
+  return e;
+}
 app.get('/api/whatsapp/groups/copy', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json(copyPayload()); });
 // Para a importação em andamento (o lote que está saindo termina; nada mais é adicionado).
 app.post('/api/whatsapp/groups/copy/stop', requireAuth, (req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
-  if(!groupCopy?.running) return res.status(409).json({error:'Não há importação em andamento.'});
-  groupCopy.stopped=true; res.json(copyPayload());
+  const e=copyEntry(req,res); if(!e)return;
+  if(!e.job.running) return res.status(409).json({error:'Essa importação não está rodando.'});
+  e.job.stopped=true; saveCopies(); res.json(copyPayload());
 });
 // Muda o limite por dia (e, se vier, o ritmo) da importação em andamento (pedido do usuário em 2026-10-05).
 // Se ela estava esperando a meia-noite e o novo limite deixa espaço, volta a adicionar na hora.
 app.post('/api/whatsapp/groups/copy/settings', requireAuth, (req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
   const body=z.object({batch:z.coerce.number().int().min(1).max(20).optional(),pauseSec:z.coerce.number().int().min(10).max(3600).optional(),dailyLimit:z.coerce.number().int().min(1).max(1000)}).parse(req.body);
-  if(!groupCopy?.running||groupCopy.stopped) return res.status(409).json({error:'Não há importação em andamento.'});
-  Object.assign(groupCopy,{dailyLimit:body.dailyLimit,...(body.batch?{batch:body.batch}:{}),...(body.pauseSec?{pauseSec:body.pauseSec}:{})});
-  res.json(copyPayload());
+  const e=copyEntry(req,res); if(!e)return;
+  if(!e.job.running||e.job.stopped) return res.status(409).json({error:'Essa importação não está rodando.'});
+  Object.assign(e.job,{dailyLimit:body.dailyLimit,...(body.batch?{batch:body.batch}:{}),...(body.pauseSec?{pauseSec:body.pauseSec}:{})});
+  saveCopies(); res.json(copyPayload());
 });
 // Continua de onde parou uma importação parada (pela pessoa ou por erro), podendo trocar limite e ritmo.
 app.post('/api/whatsapp/groups/copy/resume', requireAuth, (req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
   const body=z.object({batch:z.coerce.number().int().min(1).max(20).optional(),pauseSec:z.coerce.number().int().min(10).max(3600).optional(),dailyLimit:z.coerce.number().int().min(1).max(1000)}).parse(req.body);
-  const job=groupCopy;
-  if(!job) return res.status(409).json({error:'Não há importação para continuar.'});
-  if(job.running) return res.status(409).json({error:'A importação ainda está rodando.'});
+  const e=copyEntry(req,res); if(!e)return;
+  const job=e.job;
+  if(job.running) return res.status(409).json({error:'Essa importação ainda está rodando.'});
   if(job.invite?.running) return res.status(409).json({error:'Espere os convites terminarem de sair.'});
-  if(!groupCopyRest.length) return res.status(409).json({error:'Não falta ninguém para adicionar nessa importação.'});
+  if(!e.rest.length) return res.status(409).json({error:'Não falta ninguém para adicionar nessa importação.'});
   Object.assign(job,{dailyLimit:body.dailyLimit,...(body.batch?{batch:body.batch}:{}),...(body.pauseSec?{pauseSec:body.pauseSec}:{}),stopped:false,error:null,finishedAt:null,running:true});
-  runGroupCopy(job);
+  runGroupCopy(e);
   res.status(202).json(copyPayload());
+});
+// Tira da tela uma importação que não está rodando. Quem ela já adicionou continua sendo pulado nas próximas.
+app.delete('/api/whatsapp/groups/copy/:to', requireAuth, (req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const e=copyEntry(req,res); if(!e)return;
+  if(e.job.running||e.job.invite?.running) return res.status(409).json({error:'Pare a importação antes de tirar da lista.'});
+  groupCopies.delete(e.job.toId); saveCopies(); res.json(copyPayload());
 });
 app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
@@ -615,7 +636,10 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   const body=z.object({from:z.string().endsWith('@g.us').optional(),phones:z.array(z.string().regex(/^\d{10,15}$/)).min(1).max(5000).optional(),fileName:z.string().max(200).optional(),to:z.string().endsWith('@g.us'),batch:z.coerce.number().int().min(1).max(20).default(5),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50),inviteText:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem do convite precisa ter {link} no lugar do link do grupo.').optional()}).parse(req.body);
   if(!body.from&&!body.phones) return res.status(400).json({error:'Escolha o grupo de origem ou um arquivo com os telefones.'});
   if(body.from===body.to) return res.status(400).json({error:'Escolha grupos diferentes.'});
-  if(groupCopy?.running) return res.status(409).json({error:'Já existe uma importação em andamento.'});
+  // Outros grupos podem estar importando ao mesmo tempo; só o mesmo destino é que não pode ter duas.
+  const old=groupCopies.get(body.to);
+  if(old?.job.running) return res.status(409).json({error:`Já existe uma importação rodando para "${old.job.toName}". Pare ela antes ou escolha outro grupo.`});
+  if(old?.job.invite?.running) return res.status(409).json({error:`Os convites da importação de "${old.job.toName}" ainda estão saindo. Espere terminar.`});
   let srcName:string, srcPhones:string[], noPhone=0, dst;
   try{
     dst=await listGroupMembers(body.to);
@@ -631,41 +655,56 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   // Ordem embaralhada: adicionar na sequência exata da planilha é padrão de robô.
   const todo=shuffle(fresh.filter(p=>!before.has(p))).map(p=>`${p}@s.whatsapp.net`);
   const skippedBefore=fresh.length-todo.length;
-  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,autoInvite:!!body.inviteText,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-fresh.length,privacy:[],failed:[],failReasons:{},skippedBefore,noPhone,running:todo.length>0,error:null,finishedAt:todo.length?null:new Date().toISOString()};
-  groupCopy=job; groupCopyRest=todo; groupCopyInviteText=body.inviteText;
-  if(todo.length) runGroupCopy(job);
-  res.status(202).json(job);
+  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,autoInvite:!!body.inviteText,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,waitingConnection:false,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-fresh.length,privacy:[],failed:[],failReasons:{},skippedBefore,noPhone,running:todo.length>0,error:null,startedAt:new Date().toISOString(),finishedAt:todo.length?null:new Date().toISOString()};
+  // Uma importação antiga parada para este mesmo destino é substituída: a nova já pula quem a antiga adicionou.
+  const entry:CopyEntry={job,rest:todo,inviteText:body.inviteText};
+  groupCopies.set(body.to,entry); saveCopies();
+  if(todo.length) runGroupCopy(entry);
+  res.status(202).json(copyPayload());
 }));
 
-/** Adiciona em segundo plano quem falta em groupCopyRest. Limite do dia, lote e pausa são lidos do job a cada volta, porque podem mudar no meio. */
-function runGroupCopy(job:GroupCopy){
+const notConnected=(e:any)=>/não conectado/i.test(String(e?.message||e));
+
+/** Adiciona em segundo plano quem falta em entry.rest. Limite do dia, lote e pausa são lidos do job a cada volta, porque podem mudar no meio. */
+function runGroupCopy(entry:CopyEntry){
+  const job=entry.job;
   (async()=>{
     try{
       // Espera em fatias curtas para o "Parar" (e a troca do limite) responder logo.
       const wait=async(ms:number,until=()=>false)=>{ const end=Date.now()+ms; while(!job.stopped&&!until()&&Date.now()<end) await new Promise(r=>setTimeout(r,Math.min(5_000,end-Date.now()))); };
-      while(groupCopyRest.length&&!job.stopped&&groupCopy===job){
+      while(entry.rest.length&&!job.stopped&&groupCopies.get(job.toId)===entry){
         // Bateu o limite do dia: espera a virada do dia (ou a pessoa aumentar o limite) e continua sozinho.
         const room=job.dailyLimit-addsToday();
         if(room<=0){
-          job.waitingUntil=nextSpMidnight().toISOString();
+          job.waitingUntil=nextSpMidnight().toISOString(); saveCopies();
           await wait(new Date(job.waitingUntil).getTime()-Date.now(),()=>job.dailyLimit>addsToday());
           job.waitingUntil=null;
           continue;
         }
+        // WhatsApp caiu: em vez de parar a importação, espera ele voltar e segue de onde estava.
+        if(getWaState().status!=='connected'){
+          job.waitingConnection=true;
+          await wait(60_000,()=>getWaState().status==='connected');
+          continue;
+        }
+        job.waitingConnection=false;
         // Lote de tamanho variado (de 1 até o escolhido) para não ter um ritmo certinho de máquina.
         const size=1+Math.floor(Math.random()*job.batch);
-        const batch=groupCopyRest.slice(0,Math.min(size,room));
-        groupCopyRest=groupCopyRest.slice(batch.length);
-        countAdds(batch.length);
+        const batch=entry.rest.slice(0,Math.min(size,room));
+        entry.rest=entry.rest.slice(batch.length);
         let results;
         try{ results=await addGroupMembers(job.toId,batch); }
         catch(e:any){
-          // Não chegou a adicionar: o lote volta para a fila, para o "Continuar" tentar de novo.
-          groupCopyRest=[...batch,...groupCopyRest];
+          // Não chegou a adicionar: o lote volta para a fila.
+          entry.rest=[...batch,...entry.rest];
+          // Caiu bem na hora de mandar: não conta no limite do dia e espera reconectar (volta do laço).
+          if(notConnected(e)){ await wait(5_000); continue; }
+          countAdds(batch.length);
           // Sem ser administrador do destino não adianta continuar.
           if(/not-authorized|forbidden/i.test(String(e?.message||e))) throw new Error(`Você precisa ser administrador do grupo "${job.toName}" para adicionar pessoas.`);
           throw e;
         }
+        countAdds(batch.length);
         rememberAdded(job.toId,results.filter(r=>r.result==='added'||r.result==='already').map(r=>r.jid.split('@')[0]));
         for(const r of results){
           const phone=r.jid.split('@')[0];
@@ -675,23 +714,44 @@ function runGroupCopy(job:GroupCopy){
           else { job.failed.push(phone); job.failReasons[phone]=r.reason||'erro desconhecido'; }
         }
         job.done+=batch.length;
+        saveCopies();
         // Pausa variada: entre 70% e 150% do tempo escolhido.
-        if(groupCopyRest.length) await wait(job.pauseSec*1000*(0.7+Math.random()*0.8));
+        if(entry.rest.length) await wait(job.pauseSec*1000*(0.7+Math.random()*0.8));
       }
     }catch(e:any){ job.error=e?.message||String(e); }
     finally{
       // Convite automático: ao terminar, manda no privado de quem a privacidade barrou.
       // Se a importação foi parada pela pessoa (ou deu erro e pode continuar), não manda — ela pode mandar pelo botão se quiser.
       // O convite já nasce "running" antes de a importação acabar, para a tela não parar de atualizar no meio.
-      if(groupCopyInviteText&&job.privacy.length&&!job.stopped&&!job.error&&!job.invite) job.invite={total:job.privacy.length,sent:0,failed:[],running:true,error:null};
-      job.running=false; job.waitingUntil=null; job.finishedAt=new Date().toISOString();
+      if(entry.inviteText&&job.privacy.length&&!job.stopped&&!job.error&&!job.invite) job.invite={total:job.privacy.length,sent:0,failed:[],running:true,error:null};
+      job.running=false; job.waitingUntil=null; job.waitingConnection=false; job.finishedAt=new Date().toISOString();
+      saveCopies();
     }
     if(job.invite?.running){
-      const err=await startInvites(job,groupCopyInviteText!).catch((e:any)=>e?.message||String(e));
-      if(err) job.invite={total:job.privacy.length,sent:0,failed:[],running:false,error:err};
+      const err=await startInvites(job,entry.inviteText!).catch((e:any)=>e?.message||String(e));
+      if(err){ job.invite={total:job.privacy.length,sent:0,failed:[],running:false,error:err}; saveCopies(); }
     }
   })();
 }
+
+// Ao ligar o sistema: carrega as importações salvas e retoma sozinho as que estavam rodando
+// (se o WhatsApp ainda não conectou, elas esperam ele voltar). Convites que estavam saindo não são reenviados
+// sozinhos, para ninguém receber a mesma mensagem duas vezes.
+(function loadCopies(){
+  let saved:CopyEntry[]=[];
+  try{ saved=JSON.parse(fs.readFileSync(COPIES_FILE,'utf8'))||[]; }catch{ return; }
+  for(const e of saved){
+    if(!e?.job?.toId||!Array.isArray(e.rest)) continue;
+    e.job.startedAt||=e.job.finishedAt||new Date().toISOString();
+    e.job.waitingUntil=null; e.job.waitingConnection=false;
+    if(e.job.invite?.running) e.job.invite={...e.job.invite,running:false,error:'o sistema foi reiniciado no meio do envio.'};
+    groupCopies.set(e.job.toId,e);
+    if(e.job.running){
+      if(e.job.stopped||!e.rest.length){ e.job.running=false; e.job.finishedAt=new Date().toISOString(); }
+      else runGroupCopy(e);
+    }
+  }
+})();
 
 // Link de convite do grupo, para mandar a quem não pôde ser adicionado direto.
 app.get('/api/whatsapp/groups/:id/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
@@ -700,18 +760,19 @@ app.get('/api/whatsapp/groups/:id/invite', requireAuth, asyncRoute(async(req:any
   catch(e:any){ res.status(409).json({error:/not-authorized|forbidden/i.test(String(e?.message||e))?'Você precisa ser administrador do grupo para pegar o link de convite.':e.message}); }
 }));
 
-// Manda o convite no privado de quem a privacidade não deixou adicionar na última importação.
+// Manda o convite no privado de quem a privacidade não deixou adicionar na importação escolhida.
 // Um de cada vez, com pausa sorteada entre 25 e 45s: mensagem em massa para quem não tem o número salvo chama atenção do WhatsApp.
 app.post('/api/whatsapp/groups/copy/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
   const body=z.object({text:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem precisa ter {link} no lugar do link do grupo.')}).parse(req.body);
-  const job=groupCopy;
-  if(!job||job.running) return res.status(409).json({error:'Espere a importação terminar para mandar os convites.'});
+  const e=copyEntry(req,res); if(!e)return;
+  const job=e.job;
+  if(job.running) return res.status(409).json({error:'Espere a importação terminar para mandar os convites.'});
   if(job.invite?.running) return res.status(409).json({error:'Os convites já estão sendo enviados.'});
   if(!job.privacy.length) return res.status(400).json({error:'Ninguém ficou de fora por privacidade.'});
   const err=await startInvites(job,body.text);
   if(err) return res.status(409).json({error:err});
-  res.status(202).json(job);
+  res.status(202).json(copyPayload());
 }));
 
 /** Começa a mandar o convite em segundo plano para quem ficou de fora por privacidade. Devolve o erro, se não deu nem para começar. */
@@ -722,19 +783,19 @@ async function startInvites(job:GroupCopy,template:string):Promise<string|null>{
   const text=template.replaceAll('{link}',link).replaceAll('{grupo}',job.toName);
   const phones=[...job.privacy];
   const inv:GroupInvite={total:phones.length,sent:0,failed:[],running:true,error:null};
-  job.invite=inv;
+  job.invite=inv; saveCopies();
   (async()=>{
     try{
       for(let i=0;i<phones.length;i++){
         try{ await sendWhatsAppWebText(`${phones[i]}@s.whatsapp.net`,text); inv.sent++; }
         catch(e:any){
-          if(/não conectado/i.test(String(e?.message||e))) throw e;
+          if(notConnected(e)) throw e;
           inv.failed.push(phones[i]);
         }
         if(i+1<phones.length) await new Promise(r=>setTimeout(r,25_000+Math.random()*20_000));
       }
     }catch(e:any){ inv.error=e?.message||String(e); }
-    finally{ inv.running=false; }
+    finally{ inv.running=false; saveCopies(); }
   })();
   return null;
 }
