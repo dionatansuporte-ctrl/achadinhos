@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { CheckCircle2, LogOut, MessageCircle, Pause, Play, RefreshCw, Smartphone } from 'lucide-react';
+import { CheckCircle2, LogOut, MessageCircle, Pause, Play, Plus, RefreshCw, Smartphone } from 'lucide-react';
 import { api } from './api';
 import GroupContacts from './GroupContacts';
 
-type State = { status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; error?: string | null; hasSession?: boolean };
-type Group = { id: string; name: string; participants: number };
+// Um número de WhatsApp pareado (ou pareando). "principal" é o primeiro; os outros são n2, n3...
+type Session = { id: string; main: boolean; status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; error?: string | null; hasSession?: boolean };
+type Group = { id: string; name: string; participants: number; session?: string };
 type Channel = { id: string; type: string; destination: string; enabled: boolean };
 
-/** Painel de pareamento do WhatsApp por QR code e escolha dos grupos que recebem ofertas (enviar / parar envio). */
+/** Painel de pareamento dos números de WhatsApp por QR code e escolha dos grupos que recebem ofertas (enviar / parar envio). */
 export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel[]; onChanged: () => void }) {
-  const [st, setSt] = useState<State>({ status: 'disconnected' });
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState('');
@@ -17,32 +18,46 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
   const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
 
-  const refresh = () => api.get('/api/whatsapp/status').then(r => setSt(r.data)).catch(() => {});
+  const refresh = () => api.get('/api/whatsapp/status').then(r => setSessions(r.data.sessions || [])).catch(() => {});
+  const pairing = (s: Session) => s.status === 'connecting' || s.status === 'qr';
 
-  // Enquanto pareia, consulta o status a cada 2s para mostrar o QR e detectar a conexão.
+  // Enquanto algum número pareia, consulta o status a cada 2s para mostrar o QR e detectar a conexão.
   useEffect(() => {
     refresh();
     timer.current = window.setInterval(() => {
-      setSt(prev => { if (prev.status === 'connecting' || prev.status === 'qr') refresh(); return prev; });
+      setSessions(prev => { if (prev.some(pairing)) refresh(); return prev; });
     }, 2000);
     return () => { if (timer.current) window.clearInterval(timer.current); };
   }, []);
 
-  useEffect(() => { if (st.status === 'connected') loadGroups(); }, [st.status]);
+  const connected = sessions.filter(s => s.status === 'connected');
+  // Recarrega os grupos sempre que muda quem está conectado (um número novo traz os grupos dele).
+  const connectedKey = connected.map(s => s.id).join(',');
+  useEffect(() => { if (connectedKey) loadGroups(); else setGroups([]); }, [connectedKey]);
 
-  async function connect() {
+  async function connect(id: string) {
     setMsg(''); setBusy(true);
-    try { await api.post('/api/whatsapp/connect'); setSt(s => ({ ...s, status: 'connecting' })); }
-    catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a conexão.'); }
+    try { await api.post('/api/whatsapp/connect', { session: id }); setSessions(list => list.map(s => s.id === id ? { ...s, status: 'connecting', error: null } : s)); }
+    catch (e: any) { setMsg(e?.response?.data?.error || 'Desculpe, não consegui iniciar a conexão. Tente de novo.'); }
     finally { setBusy(false); }
   }
 
-  async function logout() {
-    if (!confirm('Desconectar este WhatsApp? Será preciso escanear o QR code de novo.')) return;
-    setBusy(true);
-    try { await api.post('/api/whatsapp/logout'); setGroups([]); setPicked({}); await refresh(); }
+  async function addNumber() {
+    setMsg(''); setBusy(true);
+    try { await api.post('/api/whatsapp/sessions'); await refresh(); }
+    catch (e: any) { setMsg(e?.response?.data?.error || 'Desculpe, não consegui gerar o QR code do novo número. Tente de novo.'); }
     finally { setBusy(false); }
   }
+
+  async function logout(s: Session) {
+    if (s.status === 'connected' && !confirm(`Desconectar o WhatsApp +${s.me?.id || ''}? Será preciso escanear o QR code de novo, e os grupos dele param de receber ofertas.`)) return;
+    setBusy(true);
+    try { await api.post('/api/whatsapp/logout', { session: s.id }); setPicked({}); await refresh(); }
+    finally { setBusy(false); }
+  }
+
+  // Número de cada sessão, para mostrar por qual número sai cada grupo quando há mais de um.
+  const phoneOf = new Map(sessions.map(s => [s.id, s.me?.id ? `+${s.me.id}` : '']));
 
   async function loadGroups() {
     setMsg('');
@@ -85,36 +100,69 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
     <div className="card">
       <div className="card-head">
         <div><MessageCircle size={20} /><h3>WhatsApp — grupos</h3></div>
-        <span className={`badge ${st.status === 'connected' ? 'badge-on' : st.status === 'disconnected' ? 'badge-off' : 'badge-ready'}`}>
-          {st.status === 'connected' && <CheckCircle2 size={15} />}
-          {st.status === 'connected' ? `Conectado${st.me?.id ? ` · +${st.me.id}` : ''}` : st.status === 'qr' ? 'Aguardando leitura do QR' : st.status === 'connecting' ? 'Conectando...' : 'Desconectado'}
+        <span className={`badge ${connected.length ? 'badge-on' : sessions.some(pairing) ? 'badge-ready' : 'badge-off'}`}>
+          {connected.length > 0 && <CheckCircle2 size={15} />}
+          {connected.length > 1 ? `${connected.length} números conectados` : connected.length ? `Conectado · +${connected[0].me?.id || ''}` : sessions.some(pairing) ? 'Aguardando leitura do QR' : 'Desconectado'}
         </span>
       </div>
 
-      {st.status === 'disconnected' && (
-        <div className="wa-connect">
-          <Smartphone size={40} />
-          <p className="muted">Conecte o seu WhatsApp para listar os grupos e enviar as ofertas neles. Funciona como o WhatsApp Web: você escaneia um QR code pelo celular.</p>
-          <p className="hint" style={{ margin: 0 }}>Este caminho usa uma conexão não oficial. Prefira um número secundário — há risco de bloqueio pela Meta com volume alto.</p>
-          <button className="primary" disabled={busy} onClick={connect}><Smartphone size={17} /> Conectar WhatsApp</button>
-          {st.error && <p className="inline-msg">{st.error}</p>}
+      {sessions.map(s => (
+        <div key={s.id}>
+          {s.status === 'connected' && (
+            <div className="wa-number">
+              <Smartphone size={18} />
+              <span className="wa-number-name">+{s.me?.id}{s.me?.name ? ` · ${s.me.name}` : ''}</span>
+              {s.main && <span className="badge badge-ready">Principal</span>}
+              <span className="badge badge-on">Conectado</span>
+              <button className="outline" disabled={busy} onClick={() => logout(s)}><LogOut size={16} /> Desconectar</button>
+            </div>
+          )}
+
+          {/* Nenhum número conectado ainda: o convite grande para conectar o primeiro. */}
+          {s.status === 'disconnected' && s.main && !connected.length && (
+            <div className="wa-connect">
+              <Smartphone size={40} />
+              <p className="muted">Conecte o seu WhatsApp para listar os grupos e enviar as ofertas neles. Funciona como o WhatsApp Web: você escaneia um QR code pelo celular.</p>
+              <p className="hint" style={{ margin: 0 }}>Este caminho usa uma conexão não oficial. Prefira um número secundário — há risco de bloqueio pela Meta com volume alto.</p>
+              <button className="primary" disabled={busy} onClick={() => connect(s.id)}><Smartphone size={17} /> Conectar WhatsApp</button>
+              {s.error && <p className="inline-msg">{s.error}</p>}
+            </div>
+          )}
+
+          {s.status === 'disconnected' && (!s.main || connected.length > 0) && (
+            <div className="wa-number">
+              <Smartphone size={18} />
+              <span className="wa-number-name">{s.main ? 'Número principal' : 'Outro número'} — desconectado</span>
+              <button className="outline" disabled={busy} onClick={() => connect(s.id)}><Smartphone size={16} /> Gerar QR code</button>
+              {!s.main && <button className="outline" disabled={busy} onClick={() => logout(s)}>Remover</button>}
+              {s.error && <p className="inline-msg" style={{ flexBasis: '100%' }}>{s.error}</p>}
+            </div>
+          )}
+
+          {pairing(s) && (
+            <div className="wa-connect">
+              {!s.main && <p className="muted" style={{ margin: 0 }}><b>Novo número:</b> escaneie com o celular do número que você quer adicionar.</p>}
+              {s.qr ? <img src={s.qr} alt="QR code do WhatsApp" className="wa-qr" /> : <div className="wa-qr wa-qr-wait">Gerando QR...</div>}
+              <p className="muted" style={{ maxWidth: 420 }}>No celular: <b>WhatsApp → Dispositivos conectados → Conectar dispositivo</b> e aponte para o código.</p>
+              <button className="outline" onClick={() => logout(s)}>Cancelar</button>
+            </div>
+          )}
+        </div>
+      ))}
+
+      {/* No máximo 4 contas (pedido do usuário em 2026-10-08). */}
+      {connected.length > 0 && sessions.length < 4 && !sessions.some(s => !s.main && pairing(s)) && (
+        <div className="capture-actions" style={{ marginTop: 10 }}>
+          <button className="outline" disabled={busy} onClick={addNumber}><Plus size={16} /> Adicionar outro número</button>
         </div>
       )}
+      {connected.length > 0 && <p className="hint">Dá para conectar até 4 números, cada um com o seu QR code. A oferta de um grupo sai pelo número que está nele; com vários números, dá para dividir os grupos entre eles e diminuir o volume de cada um.</p>}
 
-      {(st.status === 'connecting' || st.status === 'qr') && (
-        <div className="wa-connect">
-          {st.qr ? <img src={st.qr} alt="QR code do WhatsApp" className="wa-qr" /> : <div className="wa-qr wa-qr-wait">Gerando QR...</div>}
-          <p className="muted" style={{ maxWidth: 420 }}>No celular: <b>WhatsApp → Dispositivos conectados → Conectar dispositivo</b> e aponte para o código.</p>
-          <button className="outline" onClick={logout}>Cancelar</button>
-        </div>
-      )}
-
-      {st.status === 'connected' && (
+      {connected.length > 0 && (
         <>
           <div className="form-row form-row-tight" style={{ marginTop: 10 }}>
             <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Buscar grupo pelo nome" />
             <button className="outline" onClick={loadGroups}><RefreshCw size={16} /> Atualizar</button>
-            <button className="outline" onClick={logout}><LogOut size={16} /> Desconectar</button>
           </div>
           {groups.length ? (
             <>
@@ -124,7 +172,7 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
                   <label className={`wa-group ${picked[g.id] ? 'on' : ''}`} key={g.id}>
                     <input type="checkbox" checked={!!picked[g.id]} onChange={e => setPicked(v => ({ ...v, [g.id]: e.target.checked }))} />
                     <span className="wa-group-name">{g.name}</span>
-                    <small>{g.participants} membros</small>
+                    <small>{g.participants} membros{connected.length > 1 && g.session && phoneOf.get(g.session) ? ` · via ${phoneOf.get(g.session)}` : ''}</small>
                     <span className={`badge ${sending(g) ? 'badge-on' : 'badge-off'}`}>{sending(g) ? 'Enviando' : 'Parado'}</span>
                     <button
                       className="outline wa-group-toggle" disabled={busy}
@@ -140,7 +188,7 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
                 <button className="outline" onClick={() => setPicked(Object.fromEntries(shown.map(g => [g.id, true])))}>Marcar todos</button>
                 <button className="outline" onClick={() => setPicked({})}>Desmarcar</button>
               </div>
-              <GroupContacts groups={groups} />
+              <GroupContacts groups={groups} sessions={connected.map(s => ({ id: s.id, phone: s.me?.id || "" }))} />
             </>
           ) : <p className="muted" style={{ marginTop: 14 }}>Carregando grupos...</p>}
         </>

@@ -452,3 +452,6 @@ button.danger:disabled{opacity:.45;cursor:not-allowed}
   .send-row{grid-template-columns:44px minmax(0,1fr) auto}
   .send-row>small,.send-row>a,.send-row>span:last-child{grid-column:2/-1}
 }
+.wa-number{display:flex;align-items:center;flex-wrap:wrap;gap:10px;border:1px solid var(--border);border-radius:14px;padding:10px 14px;margin-top:10px;background:var(--surface-2)}
+.wa-number svg{color:#25d366;flex:none}
+.wa-number-name{flex:1;font-weight:700;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

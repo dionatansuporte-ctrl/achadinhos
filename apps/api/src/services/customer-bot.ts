@@ -1,6 +1,6 @@
 import type { Customer, CustomerBot, Marketplace } from '@prisma/client';
 import { prisma } from '../db';
-import { onWhatsAppMessage, sendWhatsAppWebText, showTyping, getWaState, type WaIncoming } from '../integrations/whatsapp-web';
+import { onWhatsAppMessage, sendWhatsAppWebText, showTyping, getWaState, anyWaConnected, type WaIncoming } from '../integrations/whatsapp-web';
 import { shopeeTrackedLink, type ShopeeOffer } from '../integrations/shopee';
 import { searchOffers } from './shopee-sync';
 import { isMarketplace, marketplaceIcon, marketplaceLabel, storeIn, storeOf, type SearchMarketplace } from './marketplaces';
@@ -701,7 +701,7 @@ async function handleIncoming(m: WaIncoming) {
  */
 async function deliverPendingSearches() {
   const bot = await activeBot();
-  if (!bot || getWaState().status !== 'connected') return;
+  if (!bot || !anyWaConnected()) return;
   const pending = await prisma.customerRequest.findMany({
     where: { status: 'LIMITED', keyword: { not: null }, createdAt: { gt: new Date(Date.now() - 24 * 60 * 60_000) }, customer: { userId: bot.userId, blocked: false, optedOut: false } },
     orderBy: { createdAt: 'desc' },

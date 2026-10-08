@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react';
 import { Download, FileUp, Link2, Play, Send, Square, UserPlus, Users, X } from 'lucide-react';
 import { api } from './api';
 
-type Group = { id: string; name: string; participants: number };
+// sessions/admins: ids dos números conectados que estão no grupo e quais deles são administradores.
+type Group = { id: string; name: string; participants: number; sessions?: string[]; admins?: string[] };
+type Session = { id: string; phone: string };
 type Invite = { total: number; sent: number; failed: string[]; running: boolean; error: string | null };
-type Copy = { fromName: string; toId: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; waitingConnection?: boolean; warmingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null; left?: number };
+type Copy = { fromName: string; toId: string; toName: string; invite?: Invite | null; autoInvite?: boolean; batch?: number; pauseSec?: number; dailyLimit?: number; waitingUntil?: string | null; waitingConnection?: boolean; warmingUntil?: string | null; stopped?: boolean; total: number; done: number; added: number; already: number; privacy: string[]; failed: string[]; failReasons?: Record<string, string>; skippedBefore?: number; noPhone: number; running: boolean; error: string | null; finishedAt: string | null; left?: number; session?: string | null; sessionPhone?: string | null; tempContacts?: boolean };
 
 function downloadCsv(fileName: string, rows: string[][]) {
   // BOM para o Excel abrir os acentos certinho; ";" é o separador que o Excel em português espera.
@@ -65,10 +67,26 @@ const DEFAULT_INVITE = 'Oi, tudo bem? 😊 Tentei te adicionar no grupo *{grupo}
 
 const leftOf = (c: Copy) => c.left ?? c.total - c.done;
 
-/** Extrai os contatos de um grupo em planilha ou adiciona os membros de um grupo em outro. */
-export default function GroupContacts({ groups }: { groups: Group[] }) {
+/** Extrai os contatos de um grupo em planilha ou adiciona os membros de um grupo em outro. sessions: números conectados. */
+export default function GroupContacts({ groups, sessions }: { groups: Group[]; sessions: Session[] }) {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  // Número que faz a adição (pedido do usuário em 2026-10-08): só os que estão no grupo de destino.
+  const [via, setVia] = useState('');
+  // Salvar na agenda temporariamente antes de adicionar (quem tem privacidade "só meus contatos" aceita assim).
+  const [tempContacts, setTempContacts] = useState(true);
+  const multi = sessions.length > 1;
+  /** Números conectados que estão no grupo (sem a informação, todos), administradores primeiro. */
+  const candidatesFor = (groupId: string) => {
+    const g = groups.find(x => x.id === groupId);
+    const inGroup = g?.sessions?.length ? sessions.filter(s => g.sessions!.includes(s.id)) : sessions;
+    return [...inGroup].sort((a, b) => Number(!!g?.admins?.includes(b.id)) - Number(!!g?.admins?.includes(a.id)));
+  };
+  const isAdmin = (groupId: string, id: string) => !!groups.find(x => x.id === groupId)?.admins?.includes(id);
+  const phoneLabel = (groupId: string, s: Session) => `+${s.phone}${isAdmin(groupId, s.id) ? ' (administrador)' : ''}`;
+  // Ao trocar o destino, sugere o número administrador dele.
+  useEffect(() => { setVia(candidatesFor(to)[0]?.id || ''); }, [to, groups.length, sessions.length]);
+  const candidates = candidatesFor(to);
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
   // Uma importação por grupo de destino; várias podem rodar ao mesmo tempo.
@@ -93,8 +111,8 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     return () => window.clearInterval(t);
   }, [working]);
 
-  async function inviteLink(groupId: string) {
-    const r = await api.get(`/api/whatsapp/groups/${encodeURIComponent(groupId)}/invite`);
+  async function inviteLink(groupId: string, session?: string | null) {
+    const r = await api.get(`/api/whatsapp/groups/${encodeURIComponent(groupId)}/invite${multi && session ? `?session=${session}` : ''}`);
     return r.data.link as string;
   }
 
@@ -102,7 +120,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     if (!to) return setMsg('Escolha o grupo de destino.');
     setBusy(true); setMsg('');
     try {
-      const link = await inviteLink(to);
+      const link = await inviteLink(to, via);
       try { await navigator.clipboard.writeText(link); setMsg(`Link copiado! É só colar na conversa com o cliente: ${link}`); }
       catch { setMsg(`Link do grupo: ${link}`); }
     } catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível pegar o link de convite.'); }
@@ -121,6 +139,9 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
   const [jobLimits, setJobLimits] = useState<Record<string, number>>({});
   const setJobLimit = (toId: string, n: number | null) => setJobLimits(m => { const c = { ...m }; if (n == null) delete c[toId]; else c[toId] = n; return c; });
   const cleanLimit = (n: number) => Math.min(1000, Math.max(1, Math.round(n) || 50));
+  // Número escolhido no quadro de cada importação parada (sem valor = o da própria importação, se ainda estiver no grupo).
+  const [jobVias, setJobVias] = useState<Record<string, string>>({});
+  const viaFor = (copy: Copy) => { const c = candidatesFor(copy.toId); const want = jobVias[copy.toId] || copy.session || ''; return c.some(s => s.id === want) ? want : c[0]?.id || ''; };
 
   /** Troca o limite por dia de uma importação que está rodando; se ela esperava a meia-noite e o limite novo deixa espaço, volta na hora. */
   async function changeLimit(copy: Copy) {
@@ -136,9 +157,11 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
   async function resumeCopy(copy: Copy) {
     const limit = cleanLimit(jobLimits[copy.toId] ?? copy.dailyLimit ?? dailyLimit);
     const left = leftOf(copy);
-    if (!confirm(`Continuar a importação para "${copy.toName}" de onde parou?\n\nFaltam ${left} pessoa(s). Com limite de ${limit} por dia, leva ${fmtPlan(left, copy.batch || batch, copy.pauseSec || pauseSec, limit, addedToday)}.`)) return;
+    const session = multi ? viaFor(copy) : undefined;
+    const phone = sessions.find(s => s.id === session)?.phone;
+    if (!confirm(`Continuar a importação para "${copy.toName}" de onde parou?\n\nFaltam ${left} pessoa(s). Com limite de ${limit} por dia, leva ${fmtPlan(left, copy.batch || batch, copy.pauseSec || pauseSec, limit, addedToday)}.${phone ? `\nQuem adiciona: +${phone}.` : ''}`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy/resume', { to: copy.toId, dailyLimit: limit }); applyCopies(r.data); setJobLimit(copy.toId, null); }
+    try { const r = await api.post('/api/whatsapp/groups/copy/resume', { to: copy.toId, dailyLimit: limit, session }); applyCopies(r.data); setJobLimit(copy.toId, null); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível continuar a importação.'); }
     finally { setBusy(false); }
   }
@@ -165,7 +188,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
   async function downloadLeftOut(copy: Copy) {
     // Tenta pôr o link na planilha para facilitar mandar à mão; se não der, baixa sem ele.
     let link = '';
-    try { link = await inviteLink(copy.toId); } catch {}
+    try { link = await inviteLink(copy.toId, copy.session); } catch {}
     downloadCsv(`nao adicionados - ${safeName(copy.toName)}.csv`, [
       ['Telefone', 'Motivo', 'Link do grupo'],
       ...copy.privacy.map(p => [`+${p}`, 'privacidade (mandar convite)', link]),
@@ -201,9 +224,10 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     const src = groups.find(g => g.id === from), d = groups.find(g => g.id === to)?.name;
     const size = Math.min(20, Math.max(1, Math.round(batch) || 5));
     const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
-    if (!confirm(`Adicionar os membros de "${src?.name}" no grupo "${d}"?\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — com ${src?.participants || 0} membros, leva ${fmtPlan(src?.participants || 0, size, pauseSec, limit, addedToday)}.`)) return;
+    if (multi && !via) return setMsg('Nenhum número conectado está nesse grupo de destino. Entre no grupo com um dos números e clique em Atualizar.');
+    if (!confirm(`Adicionar os membros de "${src?.name}" no grupo "${d}"?${viaPhone ? ` Quem adiciona: +${viaPhone}.` : ''}\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — com ${src?.participants || 0} membros, leva ${fmtPlan(src?.participants || 0, size, pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy', { from, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined }); applyCopies(r.data); setJobLimit(to, null); }
+    try { const r = await api.post('/api/whatsapp/groups/copy', { from, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined, session: multi ? via : undefined, tempContacts }); applyCopies(r.data); setJobLimit(to, null); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a importação.'); }
     finally { setBusy(false); }
   }
@@ -218,13 +242,15 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
     const d = groups.find(g => g.id === to)?.name;
     const size = Math.min(20, Math.max(1, Math.round(batch) || 5));
     const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
-    if (!confirm(`Adicionar ${phones.length} telefone(s) do arquivo "${file.name}" no grupo "${d}"?${skipped ? `\n(${skipped} linha(s) sem telefone válido foram ignoradas.)` : ''}\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — leva ${fmtPlan(phones.length, size, pauseSec, limit, addedToday)}.`)) return;
+    if (multi && !via) return setMsg('Nenhum número conectado está nesse grupo de destino. Entre no grupo com um dos números e clique em Atualizar.');
+    if (!confirm(`Adicionar ${phones.length} telefone(s) do arquivo "${file.name}" no grupo "${d}"?${skipped ? `\n(${skipped} linha(s) sem telefone válido foram ignoradas.)` : ''}${viaPhone ? `\nQuem adiciona: +${viaPhone}.` : ''}\n\nVocê precisa ser administrador de "${d}". Vão entrar ${size} pessoa(s) a cada ${fmtPause(pauseSec)} — leva ${fmtPlan(phones.length, size, pauseSec, limit, addedToday)}.`)) return;
     setBusy(true); setMsg('');
-    try { const r = await api.post('/api/whatsapp/groups/copy', { phones, fileName: file.name, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined }); applyCopies(r.data); setJobLimit(to, null); }
+    try { const r = await api.post('/api/whatsapp/groups/copy', { phones, fileName: file.name, to, batch: size, pauseSec, dailyLimit: limit, inviteText: autoInvite ? inviteText : undefined, session: multi ? via : undefined, tempContacts }); applyCopies(r.data); setJobLimit(to, null); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível iniciar a importação.'); }
     finally { setBusy(false); }
   }
 
+  const viaPhone = multi ? sessions.find(s => s.id === via)?.phone : undefined;
   // Só o grupo de destino escolhido é que não pode ter duas importações rodando juntas.
   const destBusy = copies.some(c => c.toId === to && (c.running || c.invite?.running));
 
@@ -252,6 +278,23 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
       </div>
       {destBusy && <p className="hint">Esse grupo de destino já tem uma importação rodando (veja o quadro dela aqui embaixo). Para importar ao mesmo tempo, escolha outro grupo.</p>}
       <p className="hint">O arquivo pode ser a planilha baixada em "Extrair contatos" ou um CSV/TXT com um telefone por linha, com DDD. Sem o 55 na frente, entende como número do Brasil.</p>
+      {multi && (
+        <div className="form-row form-row-tight">
+          <label>Adicionar usando o número
+            <select value={via} onChange={e => setVia(e.target.value)} disabled={!to}>
+              {!to && <option value="">Escolha o grupo de destino primeiro</option>}
+              {to && !candidates.length && <option value="">Nenhum número conectado está nesse grupo</option>}
+              {candidates.map(s => <option key={s.id} value={s.id}>{phoneLabel(to, s)}</option>)}
+            </select>
+          </label>
+        </div>
+      )}
+      {multi && <p className="hint">Só aparecem os números conectados que estão no grupo de destino; o que adiciona precisa ser administrador. Se esse número cair no meio, a importação espera ele voltar — não troca de número sozinha.</p>}
+      <label className="check-line">
+        <input type="checkbox" checked={tempContacts} onChange={e => setTempContacts(e.target.checked)} />
+        Salvar cada número na agenda temporariamente antes de adicionar (sai da agenda logo depois)
+      </label>
+      <p className="hint">Quem bloqueou ser adicionado por desconhecidos costuma aceitar quando o número que adiciona o tem na agenda. O contato entra como "Oferta +55..." e é removido assim que o lote termina — mesmo quem você já tinha na lista passa por isso. Se algum número já estava na sua agenda, ele é tirado junto.</p>
       <div className="form-row form-row-tight">
         <label>Até quantas pessoas por vez
           <input type="number" min={1} max={20} value={batch} onChange={e => setBatch(Number(e.target.value))} />
@@ -266,7 +309,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
         </label>
         <button className="outline" disabled={busy || !to} onClick={copyLink}><Link2 size={16} /> Copiar link do grupo</button>
       </div>
-      <p className="hint">Hoje já foram adicionadas {addedToday} pessoa(s) (soma todas as importações do dia — o limite por dia vale para essa soma). Quando o limite do dia acaba, a importação espera a meia-noite e continua sozinha — o sistema precisa ficar ligado.</p>
+      <p className="hint">Hoje já foram adicionadas {addedToday} pessoa(s) (somando todos os números). O limite por dia vale para cada número separado: soma as importações do dia feitas por aquele número. Quando o limite do dia acaba, a importação espera a meia-noite e continua sozinha — o sistema precisa ficar ligado.</p>
       <p className="hint">Dá para importar para vários grupos ao mesmo tempo: cada grupo de destino tem o seu quadro aqui embaixo, e uma não apaga a outra. Se o WhatsApp cair ou o sistema reiniciar, a importação espera e continua de onde parou — mas só adiciona alguém 5 minutos depois de reconectar (1 hora depois de escanear um QR code novo). Se o WhatsApp remover o aparelho no meio, ela pausa e só volta quando você mandar.</p>
       <p className="hint">Para o WhatsApp não estranhar, a ordem é embaralhada e cada vez entra um número diferente de pessoas (até o que você escolheu), com esperas que variam um pouco. Quem o sistema já adicionou no grupo antes é pulado, mesmo que tenha saído.</p>
       <p className="hint">Só funciona se você for administrador do grupo de destino. Quem bloqueou ser adicionado por desconhecidos (privacidade) não entra direto — dá para mandar o link de convite no privado deles.</p>
@@ -289,7 +332,7 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
         const jobLimit = jobLimits[copy.toId];
         return (
           <div className="inline-msg" key={copy.toId}>
-            <b>{copy.running ? 'Importando' : 'Importação'}: {copy.fromName} → {copy.toName}</b>
+            <b>{copy.running ? 'Importando' : 'Importação'}: {copy.fromName} → {copy.toName}{copy.sessionPhone ? ` (pelo número +${copy.sessionPhone})` : ''}</b>
             {copy.running && <div>{copy.done} de {copy.total} ({pct}%)…{copy.batch && copy.pauseSec ? ` ${copy.batch} pessoa(s) a cada ${fmtPause(copy.pauseSec)}, faltam ${fmtPlan(copy.total - copy.done, copy.batch, copy.pauseSec, copy.dailyLimit || 1000, addedToday)}.` : ''}</div>}
             {copy.running && copy.waitingConnection && <div>⏸️ O WhatsApp está desconectado. A importação espera ele voltar e continua sozinha de onde parou.</div>}
             {copy.running && copy.warmingUntil && <div>⏸️ O WhatsApp conectou agora há pouco. Para ele não desconfiar, a importação espera a conexão firmar e volta sozinha às {new Date(copy.warmingUntil).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.</div>}
@@ -313,6 +356,14 @@ export default function GroupContacts({ groups }: { groups: Group[] }) {
                   <label>Limite por dia
                     <input type="number" min={1} max={1000} value={jobLimit ?? copy.dailyLimit ?? dailyLimit} onChange={e => setJobLimit(copy.toId, Number(e.target.value))} />
                   </label>
+                  {multi && (
+                    <label>Adicionar usando o número
+                      <select value={viaFor(copy)} onChange={e => setJobVias(m => ({ ...m, [copy.toId]: e.target.value }))}>
+                        {!candidatesFor(copy.toId).length && <option value="">Nenhum número conectado está nesse grupo</option>}
+                        {candidatesFor(copy.toId).map(s => <option key={s.id} value={s.id}>{phoneLabel(copy.toId, s)}</option>)}
+                      </select>
+                    </label>
+                  )}
                   <button className="primary" disabled={busy} onClick={() => resumeCopy(copy)}><Play size={16} /> Continuar de onde parou</button>
                 </div>
               </div>

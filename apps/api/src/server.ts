@@ -19,7 +19,7 @@ import { titleKey } from './services/title-key';
 import { salesReport, clearSalesCache } from './services/reports';
 import { createBackup, listBackups, backupPath, deleteBackup, BACKUP_DIR } from './services/backup';
 import { startScheduler, describeSchedule } from './services/scheduler';
-import { addGroupMembers, connectWhatsAppWeb, getWaState, groupInviteLink, hasSavedSession, listGroupMembers, listGroups, logoutWhatsAppWeb, sendWhatsAppWebText } from './integrations/whatsapp-web';
+import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, waGroupSessions, sendWhatsAppWebText, sessionForJid } from './integrations/whatsapp-web';
 import { requireAuth } from './middleware/auth';
 import { hashPassword, verifyPassword, issueSession } from './services/auth';
 import { isMailConfigured, sendMail, sendPasswordResetCode } from './services/mailer';
@@ -521,16 +521,37 @@ app.post('/api/coupons/send/:marketplace', requireAuth, asyncRoute(async(req:any
 }));
 
 // ---------- WhatsApp Web (grupos) ----------
-app.get('/api/whatsapp/status', requireAuth, (req:any,res:any)=>{ const st=getWaState(); res.json({...st,qr:canManageUsers(req.user)?st.qr:null,hasSession:hasSavedSession()}); });
+// Vários números (pedido do usuário em 2026-10-08): cada um tem o seu QR code; "principal" é o de sempre.
+// O QR só vai para quem pode gerenciar usuários.
+app.get('/api/whatsapp/status', requireAuth, (req:any,res:any)=>{ const admin=canManageUsers(req.user); res.json({sessions:listWaSessions().map(s=>({...s,qr:admin?s.qr:null}))}); });
+const SESSION_ID=z.string().regex(/^(principal|nd{1,3})$/);
+// Número escolhido para adicionar no grupo (pedido do usuário em 2026-10-08): precisa estar conectado e no grupo.
+function checkVia(via:string,groupId:string){
+  const st=listWaSessions().find(s=>s.id===via);
+  if(!st) return 'Esse número não está mais conectado. Escolha outro.';
+  if(st.status!=='connected') return `O número +${st.me?.id||via} não está conectado agora. Escolha outro ou espere ele voltar.`;
+  if(!waGroupSessions(groupId).includes(via)) return `O número +${st.me?.id} não está nesse grupo. Escolha um número que seja membro (de preferência administrador).`;
+  return null;
+}
+const sessionBody=(req:any)=>z.object({session:z.string().regex(/^(principal|nd{1,3})$/).default('principal')}).parse(req.body||{}).session;
 
 app.post('/api/whatsapp/connect', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
-  connectWhatsAppWeb().catch(()=>{});
+  const id=sessionBody(req);
+  connectWhatsAppWeb(id).catch(()=>{});
   // O QR leva ~1-3s para chegar; a tela consulta /status até aparecer.
-  res.json(getWaState());
+  res.json(getWaState(id));
 }));
 
-app.post('/api/whatsapp/logout', requireAuth, asyncRoute(async(req:any,res:any)=>{ if(!requireAdmin(req,res))return; await logoutWhatsAppWeb(); res.json({ok:true}); }));
+// Mais um número: cria a sessão e já começa a gerar o QR code dele.
+app.post('/api/whatsapp/sessions', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  // No máximo 4 contas (pedido do usuário em 2026-10-08): a principal e mais 3.
+  if(listWaSessions().length>=4) return res.status(409).json({error:'Já são 4 números, o máximo. Desconecte algum antes de adicionar outro.'});
+  res.status(201).json(getWaState(addWaSession()));
+}));
+
+app.post('/api/whatsapp/logout', requireAuth, asyncRoute(async(req:any,res:any)=>{ if(!requireAdmin(req,res))return; await logoutWhatsAppWeb(sessionBody(req)); res.json({ok:true}); }));
 
 app.get('/api/whatsapp/groups', requireAuth, asyncRoute(async(_req:any,res:any)=>{
   try{ res.json(await listGroups()); }catch(e:any){ res.status(409).json({error:e.message}); }
@@ -545,7 +566,7 @@ app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:an
 // Importação de contatos de um grupo para outro. Roda em segundo plano, em lotes pequenos
 // e com pausa entre eles: adicionar muita gente de uma vez é o jeito mais rápido de o número ser bloqueado.
 type GroupInvite={total:number;sent:number;failed:string[];running:boolean;error:string|null};
-type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;waitingConnection:boolean;warmingUntil?:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];failReasons:Record<string,string>;skippedBefore:number;noPhone:number;running:boolean;error:string|null;startedAt:string;finishedAt:string|null};
+type GroupCopy={fromName:string;toId:string;toName:string;invite:GroupInvite|null;autoInvite:boolean;batch:number;pauseSec:number;dailyLimit:number;waitingUntil:string|null;waitingConnection:boolean;warmingUntil?:string|null;stopped:boolean;total:number;done:number;added:number;already:number;privacy:string[];failed:string[];failReasons:Record<string,string>;skippedBefore:number;noPhone:number;running:boolean;error:string|null;startedAt:string;finishedAt:string|null;session?:string|null;sessionPhone?:string|null;tempContacts?:boolean};
 // Uma importação por grupo de destino (pedido do usuário em 2026-10-06): começar outra para um grupo diferente
 // não pode apagar a que estava pela metade. Quem falta (rest) fica fora do job para não ir inteiro para a tela.
 type CopyEntry={job:GroupCopy;rest:string[];inviteText?:string};
@@ -559,13 +580,24 @@ function saveCopies(){
 // Limite de pessoas adicionadas por dia (pedido do usuário em 2026-10-04). A contagem soma todas as
 // importações do dia e fica em disco, para valer mesmo se o sistema reiniciar. Tentativa conta
 // (mesmo quem não entrou por privacidade), porque o que o WhatsApp vigia é o pedido de adicionar.
+// Com vários números (2026-10-08) cada um tem a sua contagem: um número no limite não segura a importação dos outros.
 const ADD_COUNT_FILE=path.resolve(__dirname,'../.cache/group-adds.json');
 const spDay=(d=new Date())=>d.toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});
-function addsToday():number{
-  try{ const j=JSON.parse(fs.readFileSync(ADD_COUNT_FILE,'utf8')); return j.day===spDay()?Number(j.count)||0:0; }catch{ return 0; }
+function readAdds():Record<string,number>{
+  try{
+    const j=JSON.parse(fs.readFileSync(ADD_COUNT_FILE,'utf8'));
+    if(j.day!==spDay()) return {};
+    return j.by||{principal:Number(j.count)||0}; // arquivo antigo: tudo era do número principal
+  }catch{ return {}; }
 }
-function countAdds(n:number){
-  try{ fs.mkdirSync(path.dirname(ADD_COUNT_FILE),{recursive:true}); fs.writeFileSync(ADD_COUNT_FILE,JSON.stringify({day:spDay(),count:addsToday()+n})); }catch{}
+/** Quantas pessoas o número adicionou hoje (sem número: a soma de todos, para a tela). */
+function addsToday(session?:string):number{
+  const by=readAdds();
+  return session?by[session]||0:Object.values(by).reduce((a,b)=>a+b,0);
+}
+function countAdds(n:number,session:string){
+  const by=readAdds(); by[session]=(by[session]||0)+n;
+  try{ fs.mkdirSync(path.dirname(ADD_COUNT_FILE),{recursive:true}); fs.writeFileSync(ADD_COUNT_FILE,JSON.stringify({day:spDay(),count:Object.values(by).reduce((a,b)=>a+b,0),by})); }catch{}
 }
 // Quem o sistema já adicionou em cada grupo (pedido do usuário em 2026-10-05): numa nova importação
 // essas pessoas são puladas, mesmo que tenham saído do grupo — adicionar de novo quem saiu é o que mais gera denúncia.
@@ -612,10 +644,14 @@ app.post('/api/whatsapp/groups/copy/settings', requireAuth, (req:any,res:any)=>{
 // Continua de onde parou uma importação parada (pela pessoa ou por erro), podendo trocar limite e ritmo.
 app.post('/api/whatsapp/groups/copy/resume', requireAuth, (req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
-  const body=z.object({batch:z.coerce.number().int().min(1).max(20).optional(),pauseSec:z.coerce.number().int().min(10).max(3600).optional(),dailyLimit:z.coerce.number().int().min(1).max(1000)}).parse(req.body);
+  const body=z.object({batch:z.coerce.number().int().min(1).max(20).optional(),pauseSec:z.coerce.number().int().min(10).max(3600).optional(),dailyLimit:z.coerce.number().int().min(1).max(1000),session:SESSION_ID.optional()}).parse(req.body);
   const e=copyEntry(req,res); if(!e)return;
   const job=e.job;
   if(job.running) return res.status(409).json({error:'Essa importação ainda está rodando.'});
+  if(body.session&&body.session!==job.session){
+    const bad=checkVia(body.session,job.toId); if(bad) return res.status(409).json({error:bad});
+    job.session=body.session; job.sessionPhone=getWaState(body.session).me?.id||null;
+  }
   if(job.invite?.running) return res.status(409).json({error:'Espere os convites terminarem de sair.'});
   if(!e.rest.length) return res.status(409).json({error:'Não falta ninguém para adicionar nessa importação.'});
   Object.assign(job,{dailyLimit:body.dailyLimit,...(body.batch?{batch:body.batch}:{}),...(body.pauseSec?{pauseSec:body.pauseSec}:{}),stopped:false,error:null,finishedAt:null,running:true});
@@ -633,7 +669,7 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   if(!requireAdmin(req,res))return;
   // Quantas pessoas por vez e quanto esperar entre os lotes: quem importa escolhe (padrão 5 a cada 30s).
   // A origem é outro grupo (from) ou uma lista de telefones vinda de planilha (phones).
-  const body=z.object({from:z.string().endsWith('@g.us').optional(),phones:z.array(z.string().regex(/^\d{10,15}$/)).min(1).max(5000).optional(),fileName:z.string().max(200).optional(),to:z.string().endsWith('@g.us'),batch:z.coerce.number().int().min(1).max(20).default(5),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50),inviteText:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem do convite precisa ter {link} no lugar do link do grupo.').optional()}).parse(req.body);
+  const body=z.object({from:z.string().endsWith('@g.us').optional(),phones:z.array(z.string().regex(/^\d{10,15}$/)).min(1).max(5000).optional(),fileName:z.string().max(200).optional(),to:z.string().endsWith('@g.us'),batch:z.coerce.number().int().min(1).max(20).default(5),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50),inviteText:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem do convite precisa ter {link} no lugar do link do grupo.').optional(),session:SESSION_ID.optional(),tempContacts:z.boolean().default(true)}).parse(req.body);
   if(!body.from&&!body.phones) return res.status(400).json({error:'Escolha o grupo de origem ou um arquivo com os telefones.'});
   if(body.from===body.to) return res.status(400).json({error:'Escolha grupos diferentes.'});
   // Outros grupos podem estar importando ao mesmo tempo; só o mesmo destino é que não pode ter duas.
@@ -642,7 +678,8 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   if(old?.job.invite?.running) return res.status(409).json({error:`Os convites da importação de "${old.job.toName}" ainda estão saindo. Espere terminar.`});
   let srcName:string, srcPhones:string[], noPhone=0, dst;
   try{
-    dst=await listGroupMembers(body.to);
+    if(body.session){ const bad=checkVia(body.session,body.to); if(bad) return res.status(409).json({error:bad}); }
+    dst=await listGroupMembers(body.to,body.session);
     if(body.from){
       const src=await listGroupMembers(body.from);
       // Contatos sem telefone (@lid, grupos com número oculto) não podem ser adicionados.
@@ -655,7 +692,7 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
   // Ordem embaralhada: adicionar na sequência exata da planilha é padrão de robô.
   const todo=shuffle(fresh.filter(p=>!before.has(p))).map(p=>`${p}@s.whatsapp.net`);
   const skippedBefore=fresh.length-todo.length;
-  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,autoInvite:!!body.inviteText,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,waitingConnection:false,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-fresh.length,privacy:[],failed:[],failReasons:{},skippedBefore,noPhone,running:todo.length>0,error:null,startedAt:new Date().toISOString(),finishedAt:todo.length?null:new Date().toISOString()};
+  const job:GroupCopy={fromName:srcName,toId:body.to,toName:dst.name,invite:null,autoInvite:!!body.inviteText,batch:body.batch,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,waitingUntil:null,waitingConnection:false,stopped:false,total:todo.length,done:0,added:0,already:srcPhones.length-fresh.length,privacy:[],failed:[],failReasons:{},skippedBefore,noPhone,running:todo.length>0,error:null,startedAt:new Date().toISOString(),finishedAt:todo.length?null:new Date().toISOString(),session:body.session||null,sessionPhone:body.session?getWaState(body.session).me?.id||null:null,tempContacts:body.tempContacts};
   // Uma importação antiga parada para este mesmo destino é substituída: a nova já pula quem a antiga adicionou.
   const entry:CopyEntry={job,rest:todo,inviteText:body.inviteText};
   groupCopies.set(body.to,entry); saveCopies();
@@ -679,21 +716,25 @@ function runGroupCopy(entry:CopyEntry){
       // Espera em fatias curtas para o "Parar" (e a troca do limite) responder logo.
       const wait=async(ms:number,until=()=>false)=>{ const end=Date.now()+ms; while(!job.stopped&&!until()&&Date.now()<end) await new Promise(r=>setTimeout(r,Math.min(5_000,end-Date.now()))); };
       while(entry.rest.length&&!job.stopped&&groupCopies.get(job.toId)===entry){
+        // Número que está no grupo de destino: cada número tem a sua conexão e o seu limite do dia.
+        // Com número escolhido, só ele adiciona: se ele cair, a importação espera ele voltar (não troca sozinha).
+        if(job.session&&!listWaSessions().some(s=>s.id===job.session)) throw new Error(`O número +${job.sessionPhone||job.session} escolhido para esta importação foi desconectado. Continue de onde parou escolhendo outro número.`);
+        const waId=job.session||await sessionForJid(job.toId);
         // Bateu o limite do dia: espera a virada do dia (ou a pessoa aumentar o limite) e continua sozinho.
-        const room=job.dailyLimit-addsToday();
+        const room=job.dailyLimit-addsToday(waId);
         if(room<=0){
           job.waitingUntil=nextSpMidnight().toISOString(); saveCopies();
-          await wait(new Date(job.waitingUntil).getTime()-Date.now(),()=>job.dailyLimit>addsToday());
+          await wait(new Date(job.waitingUntil).getTime()-Date.now(),()=>job.dailyLimit>addsToday(waId));
           job.waitingUntil=null;
           continue;
         }
         // O WhatsApp removeu o aparelho no meio desta importação: pausa e só volta quando a pessoa mandar.
-        const wa=getWaState();
+        const wa=getWaState(waId);
         if(wa.removedAt&&wa.removedAt>runStarted) throw new Error(REMOVED_MSG);
         // WhatsApp caiu: em vez de parar a importação, espera ele voltar e segue de onde estava.
         if(wa.status!=='connected'){
           job.waitingConnection=true;
-          await wait(60_000,()=>getWaState().status==='connected');
+          await wait(60_000,()=>getWaState(waId).status==='connected');
           continue;
         }
         job.waitingConnection=false;
@@ -701,7 +742,7 @@ function runGroupCopy(entry:CopyEntry){
         const ready=Math.max((wa.pairedAt||0)+WARMUP_AFTER_PAIR,(wa.connectedAt||0)+WARMUP_AFTER_CONNECT);
         if(Date.now()<ready){
           job.warmingUntil=new Date(ready).toISOString();
-          await wait(ready-Date.now(),()=>getWaState().status!=='connected');
+          await wait(ready-Date.now(),()=>getWaState(waId).status!=='connected');
           job.warmingUntil=null;
           continue;
         }
@@ -710,18 +751,18 @@ function runGroupCopy(entry:CopyEntry){
         const batch=entry.rest.slice(0,Math.min(size,room));
         entry.rest=entry.rest.slice(batch.length);
         let results;
-        try{ results=await addGroupMembers(job.toId,batch); }
+        try{ results=await addGroupMembers(job.toId,batch,waId,job.tempContacts!==false); }
         catch(e:any){
           // Não chegou a adicionar: o lote volta para a fila.
           entry.rest=[...batch,...entry.rest];
           // Caiu bem na hora de mandar: não conta no limite do dia e espera reconectar (volta do laço).
           if(notConnected(e)){ await wait(5_000); continue; }
-          countAdds(batch.length);
+          countAdds(batch.length,waId);
           // Sem ser administrador do destino não adianta continuar.
           if(/not-authorized|forbidden/i.test(String(e?.message||e))) throw new Error(`Você precisa ser administrador do grupo "${job.toName}" para adicionar pessoas.`);
           throw e;
         }
-        countAdds(batch.length);
+        countAdds(batch.length,waId);
         rememberAdded(job.toId,results.filter(r=>r.result==='added'||r.result==='already').map(r=>r.jid.split('@')[0]));
         for(const r of results){
           const phone=r.jid.split('@')[0];
@@ -773,7 +814,8 @@ function runGroupCopy(entry:CopyEntry){
 // Link de convite do grupo, para mandar a quem não pôde ser adicionado direto.
 app.get('/api/whatsapp/groups/:id/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
-  try{ res.json({link:await groupInviteLink(String(req.params.id))}); }
+  const via=req.query.session?SESSION_ID.parse(req.query.session):undefined;
+  try{ res.json({link:await groupInviteLink(String(req.params.id),via)}); }
   catch(e:any){ res.status(409).json({error:/not-authorized|forbidden/i.test(String(e?.message||e))?'Você precisa ser administrador do grupo para pegar o link de convite.':e.message}); }
 }));
 
@@ -795,7 +837,8 @@ app.post('/api/whatsapp/groups/copy/invite', requireAuth, asyncRoute(async(req:a
 /** Começa a mandar o convite em segundo plano para quem ficou de fora por privacidade. Devolve o erro, se não deu nem para começar. */
 async function startInvites(job:GroupCopy,template:string):Promise<string|null>{
   let link:string;
-  try{ link=await groupInviteLink(job.toId); }
+  const via=job.session||await sessionForJid(job.toId);
+  try{ link=await groupInviteLink(job.toId,via); }
   catch(e:any){ return /not-authorized|forbidden/i.test(String(e?.message||e))?`Você precisa ser administrador do grupo "${job.toName}" para pegar o link de convite.`:e.message; }
   const text=template.replaceAll('{link}',link).replaceAll('{grupo}',job.toName);
   const phones=[...job.privacy];
@@ -804,7 +847,7 @@ async function startInvites(job:GroupCopy,template:string):Promise<string|null>{
   (async()=>{
     try{
       for(let i=0;i<phones.length;i++){
-        try{ await sendWhatsAppWebText(`${phones[i]}@s.whatsapp.net`,text); inv.sent++; }
+        try{ await sendWhatsAppWebText(`${phones[i]}@s.whatsapp.net`,text,undefined,via); inv.sent++; }
         catch(e:any){
           if(notConnected(e)) throw e;
           inv.failed.push(phones[i]);
@@ -909,7 +952,7 @@ app.post('/api/customers/:id/send', requireAuth, asyncRoute(async(req:any,res:an
   const body=z.object({keyword:z.string().trim().min(2).max(80).optional(),text:z.string().trim().min(1).max(2000).optional(),coupons:z.boolean().optional()}).parse(req.body);
   const c=await prisma.customer.findFirst({where:{id:req.params.id,userId:req.user.id}}); if(!c)return res.status(404).json({error:'Cliente não encontrado.'});
   if(c.optedOut) return res.status(409).json({error:'Este cliente pediu para não receber ofertas ("chega de oferta").'});
-  if(getWaState().status!=='connected') return res.status(409).json({error:'WhatsApp não conectado. Escaneie o QR code em Canais.'});
+  if(!anyWaConnected()) return res.status(409).json({error:'WhatsApp não conectado. Escaneie o QR code em Canais.'});
   try{
     if(body.keyword){ const n=await sendOffersTo(await getBot(req.user.id),c,body.keyword,{wantsCoupons:body.coupons,manual:true}); return res.json({count:n}); }
     if(body.text){ await sendTextTo(c,body.text); return res.json({count:1}); }
@@ -993,7 +1036,7 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
 const HOST=process.env.HOST||'127.0.0.1';
-app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); if(hasSavedSession()) connectWhatsAppWeb().catch(e=>console.error('WhatsApp Web:',e.message)); startScheduler(); });
+app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); connectSavedSessions(); startScheduler(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).
