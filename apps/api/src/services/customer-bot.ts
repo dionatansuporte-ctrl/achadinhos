@@ -524,6 +524,12 @@ export async function sendTextTo(customer: Customer, text: string) {
   await log(customer.id, { text: '(painel)', status: 'MANUAL', replyText: text });
 }
 
+/** Convite para entrar no grupo de ofertas (tela Clientes, 2026-10-08): fica no histórico como INVITE. */
+export async function sendInviteTo(customer: Customer, text: string) {
+  await reply(customer.jid, text);
+  await log(customer.id, { text: '(convite para o grupo)', status: 'INVITE', replyText: text });
+}
+
 /** Qual usuário atende o privado: o único que tem o atendimento ligado (a sessão do WhatsApp é uma só). */
 async function activeBot() {
   return prisma.customerBot.findFirst({ where: { enabled: true }, orderBy: { createdAt: 'asc' } });

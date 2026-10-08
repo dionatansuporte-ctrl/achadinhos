@@ -31,7 +31,7 @@ import { parseCouponText, importTelegramCoupons } from './services/coupon-import
 import { extractMercadoLivreItemId, fetchMercadoLivreItem } from './services/mercadolivre';
 import { trendingKeywords } from './integrations/mercadolivre-search';
 import { searchCategories, warmUpCategories } from './services/ml-categories';
-import { getBot, customerLink, sendOffersTo, sendTextTo, startCustomerBot, parseIntent } from './services/customer-bot';
+import { getBot, customerLink, sendOffersTo, sendTextTo, sendInviteTo, firstName, startCustomerBot, parseIntent } from './services/customer-bot';
 import QRCode from 'qrcode';
 
 const app = express();
@@ -958,6 +958,46 @@ app.post('/api/customers/:id/send', requireAuth, asyncRoute(async(req:any,res:an
     if(body.text){ await sendTextTo(c,body.text); return res.json({count:1}); }
     res.status(400).json({error:'Informe uma palavra-chave ou um texto.'});
   }catch(e:any){ res.status(400).json({error:e.message}); }
+}));
+
+// ---------- Convite para o grupo de ofertas (pedido do usuário em 2026-10-08) ----------
+// Manda o link de convite de um grupo no privado de clientes (ou de telefones avulsos). Um por vez, com pausa
+// sorteada de 25 a 45 s (como os convites da importação), em segundo plano; a tela acompanha pelo GET.
+type CustomerInvite={groupName:string;total:number;sent:number;failed:string[];skipped:number;running:boolean;error:string|null;startedAt:string};
+let customerInvite:CustomerInvite|null=null;
+app.get('/api/customers/invite', requireAuth, (_req:any,res:any)=>res.json(customerInvite));
+app.post('/api/customers/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({groupId:z.string().endsWith('@g.us'),groupName:z.string().trim().min(1).max(200),text:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem precisa ter {link} no lugar do link do grupo.'),customerIds:z.array(z.string()).max(500).default([]),phones:z.array(z.string().regex(/^\d{10,15}$/)).max(500).default([])}).parse(req.body);
+  if(!body.customerIds.length&&!body.phones.length) return res.status(400).json({error:'Marque ao menos um cliente ou digite um telefone.'});
+  if(customerInvite?.running) return res.status(409).json({error:'Ainda estou mandando os convites anteriores. Espere terminar.'});
+  if(!anyWaConnected()) return res.status(409).json({error:'WhatsApp não conectado. Escaneie o QR code em Canais.'});
+  let link:string;
+  try{ link=await groupInviteLink(body.groupId); }
+  catch(e:any){ return res.status(409).json({error:/not-authorized|forbidden/i.test(String(e?.message||e))?`Você precisa ser administrador do grupo "${body.groupName}" para pegar o link de convite.`:e.message}); }
+  const customers=body.customerIds.length?await prisma.customer.findMany({where:{id:{in:body.customerIds},userId:req.user.id}}):[];
+  // Quem pediu para parar ("chega de oferta") ou está bloqueado não recebe convite.
+  const ok=customers.filter(c=>!c.optedOut&&!c.blocked);
+  const known=new Set(customers.map(c=>c.phone).filter(Boolean));
+  const phones=[...new Set(body.phones)].filter(p=>!known.has(p));
+  // {nome} vira ", Dionatan" (ou some, se o nome não for conhecido); {grupo} e {link} são trocados direto.
+  const render=(name:string)=>body.text.replaceAll('{link}',link).replaceAll('{grupo}',body.groupName).replace(/(,\s*)?\{nome\}/g,(_m,comma)=>name?(comma?`, ${name}`:name):'');
+  const inv:CustomerInvite={groupName:body.groupName,total:ok.length+phones.length,sent:0,failed:[],skipped:customers.length-ok.length,running:true,error:null,startedAt:new Date().toISOString()};
+  customerInvite=inv;
+  (async()=>{
+    try{
+      const targets=[
+        ...ok.map(c=>({label:c.givenName||c.name||(c.phone?`+${c.phone}`:c.jid),send:()=>sendInviteTo(c,render(firstName(c)))})),
+        ...phones.map(p=>({label:`+${p}`,send:()=>sendWhatsAppWebText(`${p}@s.whatsapp.net`,render(''))}))
+      ];
+      for(const [i,t] of targets.entries()){
+        try{ await t.send(); inv.sent++; }
+        catch(e:any){ if(notConnected(e)) throw e; inv.failed.push(t.label); }
+        if(i+1<targets.length) await new Promise(r=>setTimeout(r,25_000+Math.random()*20_000));
+      }
+    }catch(e:any){ inv.error=e?.message||String(e); }
+    finally{ inv.running=false; }
+  })();
+  res.status(202).json(inv);
 }));
 
 // Usado pelo worker: a sessão do WhatsApp Web vive só neste processo.
