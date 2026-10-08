@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Copy, MessageCircle, Power, QrCode, RefreshCw, Send, Trash2, Ban, History, Bot, Clock3, Store, UserPlus, Users } from 'lucide-react';
+import { Copy, MessageCircle, Power, QrCode, RefreshCw, Send, Trash2, Ban, History, Bot, Clock3, Store, UserPlus, Users, Square, FileUp } from 'lucide-react';
 import { api } from './api';
+import { parsePhones } from './phones';
 import { notify } from './notify';
 import { MKTS, mktName, mktIcon, type Mkt } from './marketplaces';
 
@@ -17,21 +18,21 @@ type Bot = { enabled: boolean; everyMinutes: number; maxOffers: number; marketpl
 type Customer = { id: string; jid: string; phone?: string | null; name?: string | null; givenName?: string | null; notes?: string | null; blocked: boolean; optedOut: boolean; requestCount: number; lastRequestAt?: string | null; firstSeenAt: string; lastSeenAt: string; lastRequest?: { keyword?: string | null; status: string; createdAt: string; text: string } | null };
 type Payload = { bot: Bot; link: string | null; waConnected: boolean; waNumber: string | null; customers: Customer[] };
 type Group = { id: string; name: string; participants: number };
-type Invite = { groupName: string; total: number; sent: number; failed: string[]; skipped: number; running: boolean; error: string | null };
+type Invite = { groupName: string; total: number; sent: number; failed: string[]; skipped: number; running: boolean; stopped?: boolean; error: string | null; left?: number; waitingUntil?: string | null; dailyLimit?: number; pauseSec?: number };
+type InviteState = { sentToday: number; job: Invite | null };
+// Pausas entre um convite e outro; quanto maior, menor o risco de o WhatsApp bloquear o número.
+const PAUSES = [30, 60, 120, 300, 600, 900, 1800, 3600];
+const fmtPause = (s: number) => s < 60 ? `${s} segundos` : s === 60 ? '1 minuto' : s < 3600 ? `${s / 60} minutos` : '1 hora';
+/** Tempo aproximado para a fila terminar, respeitando o limite por dia. */
+function fmtPlan(people: number, pauseSec: number, limit: number, usedToday: number) {
+  const room = Math.max(0, limit - usedToday);
+  if (people <= room) { const min = Math.ceil(((people - 1) * pauseSec) / 60); return min < 1 ? 'menos de 1 minuto' : min < 60 ? `uns ${min} minuto(s)` : `umas ${Math.floor(min / 60)}h${min % 60 ? String(min % 60).padStart(2, '0') : ''}`; }
+  const moreDays = Math.ceil((people - room) / limit);
+  return `${moreDays + (room ? 1 : 0)} dia(s), porque o limite é de ${limit} por dia: ${room ? `hoje saem ${room}, ` : 'hoje o limite já acabou, '}depois ${limit} por dia, continuando sozinho a cada virada do dia`;
+}
 
 // {nome} vira ", Fulano" (ou some, se o nome não for conhecido); {grupo} e {link} são trocados pelo servidor.
 const DEFAULT_INVITE = 'Oi{nome}! 😊 Tenho um grupo no WhatsApp onde mando as melhores ofertas do dia: *{grupo}*. Se quiser entrar, é só tocar no link:\n{link}\n\nQualquer dúvida, estou por aqui!';
-/** Telefones digitados (um por linha ou separados por vírgula). 10–11 dígitos sem o 55 = Brasil. */
-function parsePhones(text: string) {
-  const out = new Set<string>();
-  for (const part of text.split(/[\n,;]+/)) {
-    const d = part.replace(/\D/g, '');
-    if (/^\d{10,11}$/.test(d) && !d.startsWith('55')) out.add(`55${d}`);
-    else if (/^\d{12,15}$/.test(d)) out.add(d);
-  }
-  return [...out];
-}
-
 const INTERVALS = [[5, '5 min'], [10, '10 min'], [15, '15 min'], [30, '30 min'], [60, '1 h'], [120, '2 h'], [240, '4 h'], [720, '12 h'], [1440, '24 h']] as const;
 const STATUS: Record<string, [string, string]> = {
   ANSWERED: ['Atendido', 'badge-on'], COUPONS: ['Cupons enviados', 'badge-on'], COUPONS_REPEAT: ['Pediu cupom de novo', 'badge-off'], ASK: ['Perguntou a loja (cupom)', 'badge-ready'], ASK_STORE: ['Perguntou a loja', 'badge-ready'], DETAIL: ['Pediu detalhes', 'badge-ready'], ASK_NAME: ['Perguntou o nome', 'badge-ready'], NAME: ['Disse o nome', 'badge-on'], MEDIA: ['Mandou áudio/foto', 'badge-off'], MANUAL: ['Enviado pelo painel', 'badge-on'], EMPTY: ['Nada encontrado', 'badge-ready'], LIMITED: ['Aguardando limite (envia sozinho)', 'badge-ready'], LIMITED_SENT: ['Enviado após o limite', 'badge-on'],
@@ -59,10 +60,28 @@ export default function Customers() {
   const [inviteText, setInviteText] = useState(DEFAULT_INVITE);
   const [phonesText, setPhonesText] = useState('');
   const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [invite, setInvite] = useState<Invite | null>(null);
+  const [inviteState, setInviteState] = useState<InviteState>({ sentToday: 0, job: null });
+  const invite = inviteState.job;
+  const [file, setFile] = useState<{ name: string; phones: string[]; skipped: number } | null>(null);
+  const [pauseSec, setPauseSec] = useState(60);
+  const [dailyLimit, setDailyLimit] = useState(50);
+  // Telefones do arquivo + os digitados, sem repetir.
+  const typed = parsePhones(phonesText).phones;
+  const allPhones = [...new Set([...(file?.phones || []), ...typed])];
+
+  async function loadFile(f: File | null) {
+    if (!f) return setFile(null);
+    const { phones, skipped } = parsePhones(await f.text());
+    setFile({ name: f.name, phones, skipped });
+    notify(phones.length ? `${phones.length} contato(s) carregados de "${f.name}". Confira e clique em Enviar.` : 'Não achei nenhum telefone no arquivo. Coloque um número por linha, com DDD.', phones.length ? 'info' : 'error');
+  }
+  async function stopInvite() {
+    if (!confirm('Parar os convites? Quem já recebeu, recebeu; o resto não sai mais.')) return;
+    try { const r = await api.post('/api/customers/invite/stop'); setInviteState(r.data); } catch { notify('Não foi possível parar.', 'error'); }
+  }
 
   const loadGroups = () => api.get('/api/whatsapp/groups').then(r => { setGroups(r.data); setGroupId(g => g || r.data[0]?.id || ''); }).catch(() => setGroups([]));
-  const loadInvite = () => api.get('/api/customers/invite').then(r => setInvite(r.data)).catch(() => {});
+  const loadInvite = () => api.get('/api/customers/invite').then(r => setInviteState(r.data)).catch(() => {});
   useEffect(() => { loadGroups(); loadInvite(); }, []);
   // Enquanto os convites saem, acompanha a cada 5 s.
   useEffect(() => { if (!invite?.running) return; const t = setInterval(loadInvite, 5000); return () => clearInterval(t); }, [invite?.running]);
@@ -73,12 +92,13 @@ export default function Customers() {
     if (!inviteText.includes('{link}')) return notify('A mensagem precisa ter {link} no lugar do link do grupo.', 'error');
     const n = customerIds.length + phones.length;
     if (!n) return notify('Marque ao menos um cliente ou digite um telefone.', 'error');
-    if (n > 1 && !confirm(`Mandar o convite de "${g.name}" para ${n} pessoa(s)?\n\nVai uma mensagem de cada vez, com uns 30 segundos entre elas, para proteger o número.`)) return;
+    const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
+    if (n > 1 && !confirm(`Mandar o convite de "${g.name}" para ${n} pessoa(s)?\n\nVai uma mensagem de cada vez, com ${fmtPause(pauseSec)} entre elas (variando um pouco) e no máximo ${limit} por dia — leva ${fmtPlan(n, pauseSec, limit, inviteState.sentToday)}. O sistema precisa ficar ligado.`)) return;
     setBusy('invite');
     try {
-      const r = await api.post('/api/customers/invite', { groupId: g.id, groupName: g.name, text: inviteText, customerIds, phones });
-      setInvite(r.data); setSelected({}); setPhonesText('');
-      notify(n === 1 ? 'Convite enviado.' : `Convites a caminho: ${r.data.total} pessoa(s).`);
+      const r = await api.post('/api/customers/invite', { groupId: g.id, groupName: g.name, text: inviteText, customerIds, phones, pauseSec, dailyLimit: limit });
+      setInviteState(r.data); setSelected({}); setPhonesText(''); setFile(null);
+      notify(n === 1 ? 'Convite a caminho.' : `Convites a caminho: ${r.data.job?.total ?? n} pessoa(s).`);
     } catch (e: any) { notify(e?.response?.data?.error || e?.response?.data?.issues?.[0]?.message || 'Não foi possível mandar o convite.', 'error'); }
     finally { setBusy(''); }
   }
@@ -167,7 +187,7 @@ export default function Customers() {
 
     <div className="card" style={{ marginTop: 18 }}>
       <h2><Users size={20} /> Convidar para o grupo de ofertas</h2>
-      <p className="muted">Manda o link de convite de um grupo no privado do cliente. Marque os clientes na lista abaixo e use "Convidar marcados", ou digite telefones aqui.</p>
+      <p className="muted">Manda o link de convite de um grupo no privado do cliente. Marque os clientes na lista abaixo e use "Convidar marcados", ou carregue uma planilha/digite telefones aqui. Os convites saem um por um, com pausa e limite por dia, para o WhatsApp não bloquear o número.</p>
       {!data.waConnected && <div className="ml-steps">WhatsApp não conectado. Escaneie o QR code em <b>Canais</b>.</div>}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(280px,1fr))', gap: 16 }}>
         <div>
@@ -184,12 +204,33 @@ export default function Customers() {
             <textarea rows={5} value={inviteText} onChange={e => setInviteText(e.target.value)} /></div>
         </div>
         <div>
-          <div className="env-field"><label>Telefones para convidar <em>opcional</em></label>
-            <textarea rows={4} value={phonesText} onChange={e => setPhonesText(e.target.value)} placeholder={'Um por linha ou separados por vírgula, com DDD. Ex.:\n44 99999-9999\n5511988887777'} />
-            <small>Para quem ainda não falou com o robô. Sem o 55 na frente, entende como número do Brasil.</small>
-            <button className="primary" disabled={!data.waConnected || busy === 'invite' || !parsePhones(phonesText).length || !!invite?.running} onClick={() => sendInvite([], parsePhones(phonesText))} style={{ alignSelf: 'flex-start', marginTop: 6 }}><UserPlus size={15} /> Enviar convite para {parsePhones(phonesText).length || 'os'} telefone(s)</button></div>
-          {invite && <div className="inline-msg">
+          <div className="env-field"><label><FileUp size={15} /> Importar contatos de um arquivo CSV/TXT <em>opcional</em></label>
+            <input type="file" accept=".csv,.txt,text/csv,text/plain" onChange={e => loadFile(e.target.files?.[0] || null)} />
+            <small>Pode ser a planilha baixada em Canais → "Extrair contatos" ou um arquivo com um telefone por linha, com DDD. Os contatos são carregados primeiro; só saem quando você clicar em Enviar.</small>
+            {file && <div className="inline-msg" style={{ marginTop: 6 }}>
+              <b>{file.phones.length} contato(s) carregados de "{file.name}"</b>{file.skipped ? ` · ${file.skipped} linha(s) sem telefone válido ignoradas` : ''}
+              {file.phones.length > 0 && <div className="muted" style={{ fontSize: 13 }}>{file.phones.slice(0, 8).map(p => `+${p}`).join(', ')}{file.phones.length > 8 ? ` e mais ${file.phones.length - 8}` : ''}</div>}
+              <button className="outline" style={{ marginTop: 6 }} onClick={() => setFile(null)}>Limpar</button>
+            </div>}</div>
+          <div className="env-field"><label>Ou digite telefones <em>opcional</em></label>
+            <textarea rows={3} value={phonesText} onChange={e => setPhonesText(e.target.value)} placeholder={'Um por linha ou separados por vírgula, com DDD. Ex.:\n44 99999-9999\n5511988887777'} />
+            <small>Para quem ainda não falou com o robô. Sem o 55 na frente, entende como número do Brasil.</small></div>
+          <div className="form-row form-row-tight">
+            <label>Esperar entre cada convite
+              <select value={pauseSec} onChange={e => setPauseSec(Number(e.target.value))}>{PAUSES.map(p => <option key={p} value={p}>{fmtPause(p)}</option>)}</select>
+            </label>
+            <label>Limite por dia
+              <input type="number" min={1} max={1000} value={dailyLimit} onChange={e => setDailyLimit(Number(e.target.value))} />
+            </label>
+          </div>
+          <small className="muted">Hoje já saíram {inviteState.sentToday} convite(s). A pausa varia um pouco (70% a 150% do escolhido) para não ter ritmo de máquina. Quando o limite do dia acaba, a fila espera a meia-noite e continua sozinha — o sistema precisa ficar ligado. Se reiniciar, continua de onde parou.</small>
+          <button className="primary" disabled={!data.waConnected || busy === 'invite' || !allPhones.length || !!invite?.running} onClick={() => sendInvite([], allPhones)} style={{ alignSelf: 'flex-start', marginTop: 10 }}><UserPlus size={15} /> Enviar convite para {allPhones.length || 'os'} telefone(s)</button>
+          {invite && <div className="inline-msg" style={{ marginTop: 12 }}>
             <b>Convites para "{invite.groupName}":</b> {invite.sent} de {invite.total} enviado(s){invite.failed.length ? ` · ${invite.failed.length} com erro` : ''}{invite.skipped ? ` · ${invite.skipped} pulado(s) (pediram para parar ou bloqueados)` : ''}{invite.running ? '…' : '.'}
+            {invite.running && !!invite.left && invite.pauseSec && <div>Faltam {invite.left}: {fmtPlan(invite.left, invite.pauseSec, invite.dailyLimit || 1000, inviteState.sentToday)}.</div>}
+            {invite.running && invite.waitingUntil && <div>⏸️ Limite de {invite.dailyLimit} por dia atingido. Continua sozinha {new Date(invite.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })}.</div>}
+            {invite.running && (invite.stopped ? <div>Parando…</div> : <button className="outline" style={{ marginTop: 8 }} onClick={stopInvite}><Square size={15} /> Parar convites</button>)}
+            {!invite.running && invite.stopped && <div>Parado por você{invite.left ? ` — ${invite.left} não receberam` : ''}.</div>}
             {invite.failed.length > 0 && <div>Não deu para: {invite.failed.slice(0, 10).join(', ')}{invite.failed.length > 10 ? ` e mais ${invite.failed.length - 10}` : ''}</div>}
             {invite.error && <div>Ops, o envio parou: {invite.error}</div>}
           </div>}

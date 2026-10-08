@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Download, FileUp, Link2, Play, Send, Square, UserPlus, Users, X } from 'lucide-react';
 import { api } from './api';
+import { parsePhones } from './phones';
 
 // sessions/admins: ids dos números conectados que estão no grupo e quais deles são administradores.
 type Group = { id: string; name: string; participants: number; sessions?: string[]; admins?: string[] };
@@ -39,27 +40,6 @@ function fmtPlan(people: number, batch: number, pauseSec: number, limit: number,
   if (people <= room) return fmtTotal(people, batch, pauseSec);
   const moreDays = Math.ceil((people - room) / limit);
   return `${moreDays + (room ? 1 : 0)} dia(s), porque o limite é de ${limit} por dia: ${room ? `hoje entram ${room}, ` : 'hoje o limite já acabou, '}depois ${limit} por dia, e continua sozinho a cada virada do dia`;
-}
-
-/**
- * Telefones de um CSV/TXT: pega o primeiro campo de cada linha que pareça telefone.
- * Com 10 ou 11 dígitos (DDD + número) assume Brasil e põe o 55 na frente.
- */
-function parsePhones(text: string) {
-  const phones = new Set<string>();
-  let skipped = 0;
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let found = '';
-    for (const cell of line.split(/[;,\t]/)) {
-      const d = cell.replace(/\D/g, '');
-      if (/^\d{10,11}$/.test(d) && !d.startsWith('55')) { found = `55${d}`; break; }
-      if (/^\d{12,15}$/.test(d)) { found = d; break; }
-      if (/^55\d{10,11}$/.test(d)) { found = d; break; }
-    }
-    if (found) phones.add(found); else skipped++;
-  }
-  return { phones: [...phones], skipped };
 }
 
 // {grupo} e {link} são trocados pelo servidor na hora de mandar.
