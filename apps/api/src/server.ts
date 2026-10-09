@@ -19,7 +19,7 @@ import { titleKey } from './services/title-key';
 import { salesReport, clearSalesCache } from './services/reports';
 import { createBackup, listBackups, backupPath, deleteBackup, BACKUP_DIR } from './services/backup';
 import { startScheduler, describeSchedule } from './services/scheduler';
-import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, waGroupSessions, sendWhatsAppWebText, sessionForJid } from './integrations/whatsapp-web';
+import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, waGroupSessions, resolvePhoneJid, sendWhatsAppWebText, sessionForJid } from './integrations/whatsapp-web';
 import { requireAuth } from './middleware/auth';
 import { hashPassword, verifyPassword, issueSession } from './services/auth';
 import { isMailConfigured, sendMail, sendPasswordResetCode } from './services/mailer';
@@ -847,10 +847,14 @@ async function startInvites(job:GroupCopy,template:string):Promise<string|null>{
   (async()=>{
     try{
       for(let i=0;i<phones.length;i++){
-        try{ await sendWhatsAppWebText(`${phones[i]}@s.whatsapp.net`,text,undefined,via); inv.sent++; }
+        try{
+          const jid=await resolvePhoneJid(phones[i],via);
+          if(!jid){ inv.failed.push(phones[i]); console.log(`[convite] +${phones[i]}: número sem WhatsApp`); }
+          else{ await sendWhatsAppWebText(jid,text,undefined,via); inv.sent++; console.log(`[convite] +${phones[i]} (${jid}): convite para "${job.toName}" enviado`); }
+        }
         catch(e:any){
           if(notConnected(e)) throw e;
-          inv.failed.push(phones[i]);
+          inv.failed.push(phones[i]); console.log(`[convite] +${phones[i]}: ${e?.message||e}`);
         }
         if(i+1<phones.length) await new Promise(r=>setTimeout(r,25_000+Math.random()*20_000));
       }
@@ -999,12 +1003,20 @@ function runInvites(entry:InviteEntry){
             // Pediu para parar ou foi bloqueado depois de entrar na fila: pula.
             if(!c||c.optedOut||c.blocked){ job.skipped++; entry.rest.shift(); saveInvite(); continue; }
             await sendInviteTo(c,renderInvite(job,firstName(c)));
-          }else await sendWhatsAppWebText(`${t.phone}@s.whatsapp.net`,renderInvite(job,''));
+            console.log(`[convite] ${t.label}: convite para "${job.groupName}" enviado`);
+          }else{
+            // Telefone digitado/planilha: confere no WhatsApp o endereço real antes de mandar (sem isso a
+            // mensagem "sai" e some quando o número não existe ou está cadastrado sem o nono dígito).
+            const jid=await resolvePhoneJid(t.phone!);
+            if(!jid){ job.failed.push(`${t.label} (sem WhatsApp)`); console.log(`[convite] ${t.label}: número sem WhatsApp`); entry.rest.shift(); saveInvite(); continue; }
+            await sendWhatsAppWebText(jid,renderInvite(job,''));
+            console.log(`[convite] ${t.label} (${jid}): convite para "${job.groupName}" enviado`);
+          }
           job.sent++; countInvite();
         }catch(e:any){
           // Caiu bem na hora de mandar: tenta o mesmo contato de novo quando voltar.
           if(notConnected(e)){ await wait(5_000); continue; }
-          job.failed.push(t.label);
+          job.failed.push(t.label); console.log(`[convite] ${t.label}: ${e?.message||e}`);
         }
         entry.rest.shift(); saveInvite();
         // Pausa variada: entre 70% e 150% do tempo escolhido, para não ter ritmo de máquina.

@@ -471,6 +471,26 @@ export async function showTyping(jid: string, ms = 1500) {
   } catch { /* só cosmético */ }
 }
 
+/**
+ * Endereço real de um telefone no WhatsApp. Mandar direto para `telefone@s.whatsapp.net` "dá certo" mesmo
+ * quando o número não existe ou está cadastrado de outro jeito (celular do Brasil sem o nono dígito, conta
+ * nova que só responde pelo @lid): a mensagem some sem erro. Por isso pergunta ao WhatsApp antes.
+ * Devolve null quando o número não tem WhatsApp.
+ */
+export async function resolvePhoneJid(phone: string, via?: string): Promise<string | null> {
+  const digits = phone.replace(/\D/g, '');
+  const sock = via ? session(via).socket() : await sockFor(`${digits}@s.whatsapp.net`);
+  const tries = [digits];
+  // Brasil: muita conta antiga está registrada sem o 9 na frente do celular (55 DD 9XXXX-XXXX → 55 DD XXXX-XXXX).
+  const br = /^55(\d{2})9(\d{8})$/.exec(digits);
+  if (br) tries.push(`55${br[1]}${br[2]}`);
+  for (const t of tries) {
+    const [hit] = (await sock.onWhatsApp(t)) || [];
+    if (hit?.exists && hit.jid) return hit.jid;
+  }
+  return null;
+}
+
 /** Envia texto (ou foto com legenda). `via`: id do número que deve mandar; sem ele, escolhe por sessionForJid. */
 export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: string, via?: string) {
   // Aceita JID de grupo (@g.us), JID de contato ou só o telefone.
