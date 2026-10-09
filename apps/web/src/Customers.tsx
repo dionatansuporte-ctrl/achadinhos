@@ -32,7 +32,8 @@ function fmtPlan(people: number, pauseSec: number, limit: number, usedToday: num
 }
 
 // {nome} vira ", Fulano" (ou some, se o nome não for conhecido); {grupo} e {link} são trocados pelo servidor.
-const DEFAULT_INVITE = 'Oi{nome}! 😊 Tenho um grupo no WhatsApp onde mando as melhores ofertas do dia: *{grupo}*. Se quiser entrar, é só tocar no link:\n{link}\n\nQualquer dúvida, estou por aqui!';
+// Modelo pedido pelo usuário em 2026-10-09. No WhatsApp o negrito é *texto* (um asterisco de cada lado).
+const DEFAULT_INVITE = '👋 Oi{nome}! Tudo bem? 😊\n\n🛍️ Conheça o grupo *{grupo}* e receba ofertas e descontos especiais!\n\n🔒 É apenas um convite, sem spam. Você entra somente se quiser!\n\n👇 Entre aqui:\n{link}\n\n🙏 Obrigado pela atenção!';
 const INTERVALS = [[5, '5 min'], [10, '10 min'], [15, '15 min'], [30, '30 min'], [60, '1 h'], [120, '2 h'], [240, '4 h'], [720, '12 h'], [1440, '24 h']] as const;
 const STATUS: Record<string, [string, string]> = {
   ANSWERED: ['Atendido', 'badge-on'], COUPONS: ['Cupons enviados', 'badge-on'], COUPONS_REPEAT: ['Pediu cupom de novo', 'badge-off'], ASK: ['Perguntou a loja (cupom)', 'badge-ready'], ASK_STORE: ['Perguntou a loja', 'badge-ready'], DETAIL: ['Pediu detalhes', 'badge-ready'], ASK_NAME: ['Perguntou o nome', 'badge-ready'], NAME: ['Disse o nome', 'badge-on'], MEDIA: ['Mandou áudio/foto', 'badge-off'], MANUAL: ['Enviado pelo painel', 'badge-on'], EMPTY: ['Nada encontrado', 'badge-ready'], LIMITED: ['Aguardando limite (envia sozinho)', 'badge-ready'], LIMITED_SENT: ['Enviado após o limite', 'badge-on'],
@@ -201,7 +202,7 @@ export default function Customers() {
             </div>
             <small>Você precisa ser administrador do grupo para o sistema pegar o link de convite.</small></div>
           <div className="env-field"><label>Mensagem do convite (use {'{nome}'}, {'{grupo}'} e {'{link}'})</label>
-            <textarea rows={5} value={inviteText} onChange={e => setInviteText(e.target.value)} /></div>
+            <textarea rows={11} value={inviteText} onChange={e => setInviteText(e.target.value)} /></div>
         </div>
         <div>
           <div className="env-field"><label><FileUp size={15} /> Importar contatos de um arquivo CSV/TXT <em>opcional</em></label>
