@@ -44,6 +44,10 @@ a{color:var(--accent-2)}
 .nav{height:56px;margin:3px 16px 3px 12px;padding:0 16px;display:flex;align-items:center;gap:16px;border-radius:14px;color:var(--muted);text-decoration:none;font-weight:700;font-size:17px;transition:background .15s,color .15s}
 .nav:hover{background:var(--surface-2);color:var(--text)}
 .nav.active{background:var(--accent);color:#fff;box-shadow:0 6px 18px rgba(255,106,26,.3)}
+/* Cada item tem uma cor suave própria (--c, definida no App.tsx) para diferenciar sem gritar. */
+.nav[style]:not(.active){color:color-mix(in srgb,var(--c) 85%,#fff);background:color-mix(in srgb,var(--c) 30%,transparent);border-left:4px solid var(--c)}
+.nav[style]:not(.active) svg{color:color-mix(in srgb,var(--c) 80%,#fff)}
+.nav[style]:not(.active):hover{background:color-mix(in srgb,var(--c) 45%,transparent);color:#fff}
 .nav.logout{background:transparent;border:0;width:calc(100% - 28px);cursor:pointer;font-family:inherit;text-align:left;margin-top:14px}
 .nav.logout:hover{background:var(--danger-soft);color:var(--danger)}
 .main{margin-left:300px;flex:1;min-width:0}
