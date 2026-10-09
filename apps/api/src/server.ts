@@ -923,11 +923,11 @@ async function customersPayload(userId:string){
 }
 app.get('/api/customers', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await customersPayload(req.user.id))));
 app.put('/api/customers/bot', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({enabled:z.boolean().optional(),everyMinutes:z.coerce.number().int().min(1).max(1440).optional(),maxOffers:z.coerce.number().int().min(1).max(10).optional(),marketplaces:z.array(z.enum(MARKETPLACE_LIST)).min(1).max(3).optional(),askMarketplace:z.boolean().optional(),sendCoupons:z.boolean().optional(),welcomeText:z.string().max(2000).optional().nullable(),linkText:z.string().max(120).optional().nullable()}).parse(req.body);
+  const body=z.object({enabled:z.boolean().optional(),everyMinutes:z.coerce.number().int().min(1).max(1440).optional(),maxOffers:z.coerce.number().int().min(1).max(10).optional(),marketplaces:z.array(z.enum(MARKETPLACE_LIST)).min(1).max(3).optional(),askMarketplace:z.boolean().optional(),sendCoupons:z.boolean().optional(),welcomeText:z.string().max(2000).optional().nullable(),linkText:z.string().max(120).optional().nullable(),inviteText:z.string().max(2000).optional().nullable()}).parse(req.body);
   await getBot(req.user.id);
   // A sessão do WhatsApp é uma só: ligar aqui desliga o atendimento de outro usuário que estivesse ligado.
   if(body.enabled) await prisma.customerBot.updateMany({where:{userId:{not:req.user.id},enabled:true},data:{enabled:false}});
-  const data:any={...body}; if('welcomeText' in body) data.welcomeText=body.welcomeText?.trim()||null; if('linkText' in body) data.linkText=body.linkText?.trim()||null;
+  const data:any={...body}; if('welcomeText' in body) data.welcomeText=body.welcomeText?.trim()||null; if('linkText' in body) data.linkText=body.linkText?.trim()||null; if('inviteText' in body) data.inviteText=body.inviteText?.trim()||null;
   await prisma.customerBot.update({where:{userId:req.user.id},data});
   res.json(await customersPayload(req.user.id));
 }));

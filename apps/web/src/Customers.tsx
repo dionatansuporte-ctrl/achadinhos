@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Copy, MessageCircle, Power, QrCode, RefreshCw, Send, Trash2, Ban, History, Bot, Clock3, Store, UserPlus, Users, Square, FileUp } from 'lucide-react';
 import { api } from './api';
 import { parsePhones } from './phones';
@@ -14,7 +14,7 @@ import { MKTS, mktName, mktIcon, type Mkt } from './marketplaces';
  * clientes marcados ou de telefones avulsos.
  */
 
-type Bot = { enabled: boolean; everyMinutes: number; maxOffers: number; marketplaces: Mkt[]; askMarketplace: boolean; sendCoupons: boolean; welcomeText?: string | null; linkText?: string | null };
+type Bot = { enabled: boolean; everyMinutes: number; maxOffers: number; marketplaces: Mkt[]; askMarketplace: boolean; sendCoupons: boolean; welcomeText?: string | null; linkText?: string | null; inviteText?: string | null };
 type Customer = { id: string; jid: string; phone?: string | null; name?: string | null; givenName?: string | null; notes?: string | null; blocked: boolean; optedOut: boolean; requestCount: number; lastRequestAt?: string | null; firstSeenAt: string; lastSeenAt: string; lastRequest?: { keyword?: string | null; status: string; createdAt: string; text: string } | null };
 type Payload = { bot: Bot; link: string | null; waConnected: boolean; waNumber: string | null; customers: Customer[] };
 type Group = { id: string; name: string; participants: number };
@@ -58,7 +58,10 @@ export default function Customers() {
   // Convite para o grupo de ofertas.
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupId, setGroupId] = useState('');
-  const [inviteText, setInviteText] = useState(DEFAULT_INVITE);
+  // A mensagem fica salva no banco (CustomerBot.inviteText); null = ainda não carregou.
+  const [inviteText, setInviteText] = useState<string | null>(null);
+  const savedInvite = useRef<string | null>(null);
+  const [inviteSave, setInviteSave] = useState<'' | 'saving' | 'saved' | 'error'>('');
   const [phonesText, setPhonesText] = useState('');
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [inviteState, setInviteState] = useState<InviteState>({ sentToday: 0, job: null });
@@ -90,7 +93,7 @@ export default function Customers() {
   async function sendInvite(customerIds: string[], phones: string[]) {
     const g = groups.find(x => x.id === groupId);
     if (!g) return notify('Escolha o grupo de ofertas.', 'error');
-    if (!inviteText.includes('{link}')) return notify('A mensagem precisa ter {link} no lugar do link do grupo.', 'error');
+    if (!inviteText?.includes('{link}')) return notify('A mensagem precisa ter {link} no lugar do link do grupo.', 'error');
     const n = customerIds.length + phones.length;
     if (!n) return notify('Marque ao menos um cliente ou digite um telefone.', 'error');
     const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
@@ -106,6 +109,20 @@ export default function Customers() {
 
   const load = () => api.get('/api/customers').then(r => { setData(r.data); setBot(r.data.bot); }).catch(() => {});
   useEffect(() => { load(); const t = setInterval(load, 30_000); return () => clearInterval(t); }, []);
+
+  // Mensagem do convite: carrega a salva uma vez e salva sozinha 1 s depois de parar de digitar.
+  useEffect(() => { if (data && inviteText === null) { const t = data.bot.inviteText || DEFAULT_INVITE; savedInvite.current = t; setInviteText(t); } }, [data]);
+  useEffect(() => {
+    if (inviteText === null || inviteText === savedInvite.current) return;
+    setInviteSave('saving');
+    const t = setTimeout(async () => {
+      try {
+        await api.put('/api/customers/bot', { inviteText: inviteText.trim() === DEFAULT_INVITE ? null : inviteText });
+        savedInvite.current = inviteText; setInviteSave('saved');
+      } catch { setInviteSave('error'); }
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [inviteText]);
 
   async function saveBot(patch: Partial<Bot>) {
     setBusy('bot');
@@ -202,7 +219,9 @@ export default function Customers() {
             </div>
             <small>Você precisa ser administrador do grupo para o sistema pegar o link de convite.</small></div>
           <div className="env-field"><label>Mensagem do convite (use {'{nome}'}, {'{grupo}'} e {'{link}'})</label>
-            <textarea rows={11} value={inviteText} onChange={e => setInviteText(e.target.value)} /></div>
+            <textarea rows={11} value={inviteText ?? ''} onChange={e => setInviteText(e.target.value)} />
+            <small>{inviteSave === 'saving' ? 'Salvando...' : inviteSave === 'saved' ? '✓ Salvo automaticamente' : inviteSave === 'error' ? 'Não foi possível salvar, tente de novo.' : 'Salva sozinha enquanto você digita.'}
+              {inviteText !== DEFAULT_INVITE && <> · <a href="#" onClick={e => { e.preventDefault(); setInviteText(DEFAULT_INVITE); }}>Voltar ao modelo padrão</a></>}</small></div>
         </div>
         <div>
           <div className="env-field"><label><FileUp size={15} /> Importar contatos de um arquivo CSV/TXT <em>opcional</em></label>

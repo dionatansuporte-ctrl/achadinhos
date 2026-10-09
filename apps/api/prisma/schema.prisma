@@ -312,6 +312,7 @@ model CustomerBot {
   sendCoupons  Boolean  @default(true)
   welcomeText  String?
   linkText     String?  // texto pré-preenchido no link wa.me
+  inviteText   String?  // mensagem do convite para o grupo de ofertas (vazio = modelo padrão da tela)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
