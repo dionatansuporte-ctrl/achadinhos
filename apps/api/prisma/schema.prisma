@@ -323,3 +323,17 @@ model AppSetting {
   updatedAt DateTime @updatedAt
   updatedBy String?
 }
+
+// Quem entrou e saiu de cada grupo de WhatsApp (pedido do usuário em 2026-10-09), para a contagem por dia/semana.
+// kind: LINK (entrou pelo link ou pedido aprovado), ADDED (adicionado por alguém), LEFT (saiu), REMOVED (foi removido).
+// O mesmo aviso chega em cada número conectado que está no grupo; a chave única evita contar duas vezes.
+model GroupMemberEvent {
+  id        String   @id @default(cuid())
+  groupId   String
+  groupName String?
+  member    String
+  kind      String
+  at        DateTime
+  @@unique([groupId, member, kind, at])
+  @@index([at])
+}

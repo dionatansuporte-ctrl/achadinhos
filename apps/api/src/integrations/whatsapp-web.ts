@@ -6,6 +6,7 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
+  WAMessageStubType,
   type WASocket
 } from '@whiskeysockets/baileys';
 
@@ -45,6 +46,17 @@ export function onWhatsAppMessage(handler: IncomingHandler) {
   incomingHandlers.push(handler);
 }
 
+/** Alguém entrou ou saiu de um grupo. at = hora do aviso do WhatsApp (vale também para o que chegou com o sistema desligado). */
+export type WaGroupMove = { groupId: string; groupName: string | null; member: string; kind: 'LINK' | 'ADDED' | 'LEFT' | 'REMOVED'; at: Date };
+type GroupMoveHandler = (m: WaGroupMove) => Promise<void> | void;
+const groupMoveHandlers: GroupMoveHandler[] = [];
+const groupNames = new Map<string, string>();
+
+/** Registra quem guarda as entradas e saídas dos grupos (a contagem por dia/semana usa isto). */
+export function onGroupMembers(handler: GroupMoveHandler) {
+  groupMoveHandlers.push(handler);
+}
+
 // Por qual número cada contato falou por último: a resposta no privado sai pelo mesmo número.
 // Fica em disco para valer também depois de reiniciar o sistema.
 const CONTACTS_FILE = path.resolve(__dirname, '../../.cache/wa-contacts.json');
@@ -61,6 +73,20 @@ function rememberContact(jid: string, id: string) {
 
 // Uma exceção solta (de qualquer número) derrubaria o sistema inteiro e, junto, a conexão dos outros números.
 process.on('unhandledRejection', (e: any) => console.error('[whatsapp] erro não tratado (o sistema segue no ar):', e?.message || e));
+
+/** Tipo de entrada/saída de uma mensagem de sistema do grupo (null = não é entrada nem saída). */
+function groupMoveKind(stub: number | null | undefined, author: string | null | undefined, members: string[] | null | undefined): WaGroupMove['kind'] | null {
+  const self = !!author && (members || []).some(j => j.split('@')[0].split(':')[0] === author.split('@')[0].split(':')[0]);
+  switch (stub) {
+    case WAMessageStubType.GROUP_PARTICIPANT_INVITE:
+    case WAMessageStubType.GROUP_PARTICIPANT_ADD_REQUEST_JOIN: return 'LINK';
+    // "Adicionou" a si mesmo = entrou pelo link.
+    case WAMessageStubType.GROUP_PARTICIPANT_ADD: return self || !author ? 'LINK' : 'ADDED';
+    case WAMessageStubType.GROUP_PARTICIPANT_LEAVE: return 'LEFT';
+    case WAMessageStubType.GROUP_PARTICIPANT_REMOVE: return self ? 'LEFT' : 'REMOVED';
+    default: return null;
+  }
+}
 
 function messageText(msg: any): string {
   const m = msg?.message;
@@ -218,6 +244,21 @@ class WaSession {
       }
     });
 
+    // Entradas e saídas nos grupos chegam como mensagens de sistema (as "fulano entrou usando o link").
+    s.ev.on('messages.upsert', ({ messages }) => {
+      if (this.sock !== s || !groupMoveHandlers.length) return;
+      for (const msg of messages) {
+        const groupId = msg.key?.remoteJid || '';
+        const kind = groupMoveKind(msg.messageStubType, msg.participant || msg.key?.participant, msg.messageStubParameters);
+        if (!groupId.endsWith('@g.us') || !kind) continue;
+        const at = msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date();
+        for (const member of msg.messageStubParameters || []) {
+          const m: WaGroupMove = { groupId, groupName: groupNames.get(groupId) || null, member, kind, at };
+          for (const h of groupMoveHandlers) Promise.resolve(h(m)).catch(e => console.error('[whatsapp] entrada/saída de grupo:', e?.message || e));
+        }
+      }
+    });
+
     // Erro aqui dentro não pode virar exceção solta: derrubaria o sistema e, com ele, os outros números.
     s.ev.on('connection.update', (u) => void (async () => {
       // Evento de um socket antigo (já trocado por outro): ignora, senão derrubaria o atual.
@@ -320,6 +361,7 @@ class WaSession {
       const admin = (g.participants || []).some((p: any) => !!p.admin && (isMe(p.id) || isMe(p.jid) || isMe(p.lid)));
       return { id: g.id, name: g.subject || g.id, participants: g.participants?.length || 0, session: this.id, sessions: [this.id], admins: admin ? [this.id] : [] };
     });
+    for (const g of list) groupNames.set(g.id, g.name);
     this.groupIds = new Set(list.map(g => g.id));
     this.groupsAt = Date.now();
     try { fs.writeFileSync(this.groupsFile, JSON.stringify([...this.groupIds])); } catch { /* sem disco, segue */ }

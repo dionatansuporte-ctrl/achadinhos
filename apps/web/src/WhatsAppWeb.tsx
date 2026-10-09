@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { CheckCircle2, LogOut, MessageCircle, Pause, Play, Plus, RefreshCw, Smartphone } from 'lucide-react';
 import { api } from './api';
 import GroupContacts from './GroupContacts';
+import GroupGrowth from './GroupGrowth';
 
 // Um número de WhatsApp pareado (ou pareando). "principal" é o primeiro; os outros são n2, n3...
 type Session = { id: string; main: boolean; status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; error?: string | null; hasSession?: boolean };
@@ -188,6 +189,7 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
                 <button className="outline" onClick={() => setPicked(Object.fromEntries(shown.map(g => [g.id, true])))}>Marcar todos</button>
                 <button className="outline" onClick={() => setPicked({})}>Desmarcar</button>
               </div>
+              <GroupGrowth />
               <GroupContacts groups={groups} sessions={connected.map(s => ({ id: s.id, phone: s.me?.id || "" }))} />
             </>
           ) : <p className="muted" style={{ marginTop: 14 }}>Carregando grupos...</p>}

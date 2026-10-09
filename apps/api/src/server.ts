@@ -32,6 +32,7 @@ import { extractMercadoLivreItemId, fetchMercadoLivreItem } from './services/mer
 import { trendingKeywords } from './integrations/mercadolivre-search';
 import { searchCategories, warmUpCategories } from './services/ml-categories';
 import { getBot, customerLink, sendOffersTo, sendTextTo, sendInviteTo, firstName, startCustomerBot, parseIntent } from './services/customer-bot';
+import { groupGrowth, startGroupGrowth, GROWTH_PERIODS, type GrowthPeriod } from './services/group-growth';
 import QRCode from 'qrcode';
 
 const app = express();
@@ -555,6 +556,15 @@ app.post('/api/whatsapp/logout', requireAuth, asyncRoute(async(req:any,res:any)=
 
 app.get('/api/whatsapp/groups', requireAuth, asyncRoute(async(_req:any,res:any)=>{
   try{ res.json(await listGroups()); }catch(e:any){ res.status(409).json({error:e.message}); }
+}));
+
+// Quantas pessoas entraram/saíram de cada grupo no período (hoje, ontem, 7 ou 30 dias); groupId filtra o dia a dia.
+app.get('/api/whatsapp/groups/growth', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const period=(String(req.query.period||'7d') in GROWTH_PERIODS?String(req.query.period||'7d'):'7d') as GrowthPeriod;
+  // Nomes atuais dos grupos (se o WhatsApp estiver conectado); sem conexão, vale o nome guardado.
+  const names=new Map<string,string>();
+  if(anyWaConnected()) for(const g of await listGroups().catch(()=>[])) names.set(g.id,g.name);
+  res.json(await groupGrowth(period,req.query.groupId?String(req.query.groupId):undefined,names));
 }));
 
 // Contatos de um grupo (para baixar em planilha).
@@ -1134,7 +1144,7 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
 const HOST=process.env.HOST||'127.0.0.1';
-app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); connectSavedSessions(); startScheduler(); });
+app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); startGroupGrowth(); connectSavedSessions(); startScheduler(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).
