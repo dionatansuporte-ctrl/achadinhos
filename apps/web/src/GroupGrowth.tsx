@@ -13,7 +13,7 @@ const fmtNet = (n: number) => n > 0 ? `+${n}` : String(n);
 const fmtDay = (d: string) => new Date(`${d}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' });
 
 /** Quantas pessoas entraram e saíram de cada grupo, no dia ou na semana (pedido do usuário em 2026-10-09). */
-export default function GroupGrowth() {
+export default function GroupGrowth({ inCard }: { inCard?: boolean }) {
   const [period, setPeriod] = useState<typeof PERIODS[number][0]>('7d');
   const [groupId, setGroupId] = useState('');
   const [r, setR] = useState<Growth | null>(null);
@@ -33,7 +33,7 @@ export default function GroupGrowth() {
   const groupName = r?.groups.find(g => g.id === groupId)?.name;
 
   return (
-    <div style={{ marginTop: 22 }}>
+    <div style={{ marginTop: inCard ? 0 : 22 }}>
       <div className="card-head"><div><TrendingUp size={20} /><h3>Entradas nos grupos</h3></div></div>
       <p className="muted">Quantas pessoas entraram e saíram de cada grupo. Clique num grupo para ver o dia a dia só dele.</p>
       <div className="capture-actions" style={{ marginTop: 8 }}>
