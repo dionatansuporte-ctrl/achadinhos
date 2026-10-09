@@ -19,6 +19,9 @@ sh.Run "cmd /c call """ & root & "\tools\postgres.bat"" start >> """ & logs & "\
 
 ' Se ja estiver rodando, nao sobe de novo (evita duas APIs na mesma porta).
 If Not JaRodando() Then
+  ' Cliente do banco (Prisma) atualizado antes de subir: com a API parada o Windows solta a DLL.
+  ' Sem isso uma tabela nova da "Cannot read properties of undefined (reading 'findMany')" no painel (2026-10-09).
+  sh.Run "cmd /c chcp 65001 >nul && cd /d """ & root & "\apps\api"" && npx prisma generate >> """ & logs & "\migrate.log"" 2>&1", 0, True
   sh.Run "cmd /c chcp 65001 >nul && cd /d """ & root & "\apps\api"" && npm run dev >> """ & logs & "\api.log"" 2>&1", 0, False
   sh.Run "cmd /c chcp 65001 >nul && cd /d """ & root & "\apps\api"" && npm run worker >> """ & logs & "\worker.log"" 2>&1", 0, False
   If Not semWeb Then

@@ -29,6 +29,14 @@ if errorlevel 1 (
 ) else (
   echo   banco atualizado.
 )
+REM Cliente do banco (Prisma) gerado junto: sem isso uma tabela nova da "Cannot read properties of undefined
+REM (reading 'findMany')" no painel (aconteceu em 2026-10-09). So da para gerar com a API parada,
+REM porque o Windows trava a DLL do Prisma enquanto ela roda.
+call :ja_rodando
+if "!RODANDO!"=="0" (
+  call npx prisma generate >> ..\..\logs\migrate.log 2>&1
+  if errorlevel 1 (echo   AVISO: prisma generate falhou, veja logs\migrate.log. Seguindo mesmo assim.) else (echo   cliente do banco atualizado.)
+)
 popd
 
 REM ---------- 3) API, worker e painel ----------
