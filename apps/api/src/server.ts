@@ -979,7 +979,8 @@ app.post('/api/customers/:id/send', requireAuth, asyncRoute(async(req:any,res:an
 // pausa escolhida (sorteada entre 70% e 150% dela) e limite por dia, em segundo plano; a tela acompanha pelo GET.
 // A fila fica em disco para continuar de onde parou se o sistema reiniciar.
 type InviteTarget={customerId?:string;phone?:string;label:string};
-type CustomerInvite={groupId:string;groupName:string;text:string;link:string;pauseSec:number;dailyLimit:number;total:number;sent:number;failed:string[];skipped:number;waitingUntil:string|null;stopped:boolean;running:boolean;error:string|null;startedAt:string;finishedAt:string|null};
+// already: quantos foram pulados porque já tinham recebido o convite deste grupo antes.
+type CustomerInvite={groupId:string;groupName:string;text:string;link:string;pauseSec:number;dailyLimit:number;total:number;sent:number;failed:string[];skipped:number;already?:number;waitingUntil:string|null;stopped:boolean;running:boolean;error:string|null;startedAt:string;finishedAt:string|null};
 type InviteEntry={job:CustomerInvite;rest:InviteTarget[]};
 let customerInvite:InviteEntry|null=null;
 const INVITE_FILE=path.resolve(__dirname,'../.cache/customer-invite.json');
@@ -991,6 +992,15 @@ function countInvite(){ try{ fs.mkdirSync(path.dirname(INVITE_COUNT_FILE),{recur
 const invitePayload=()=>({sentToday:invitesToday(),job:customerInvite?{...customerInvite.job,left:customerInvite.rest.length}:null});
 // {nome} vira ", Dionatan" (ou some, se o nome não for conhecido); {grupo} e {link} são trocados direto.
 const renderInvite=(job:CustomerInvite,name:string)=>job.text.replaceAll('{link}',job.link).replaceAll('{grupo}',job.groupName).replace(/(,\s*)?\{nome\}/g,(_m,comma)=>name?(comma?`, ${name}`:name):'');
+// Chave de quem já recebeu convite (ver GroupInviteSent): telefone sem o nono dígito, ou "lid:<id>".
+function inviteKey(phoneOrJid:string){
+  if(phoneOrJid.endsWith('@lid')) return `lid:${phoneOrJid.split('@')[0].split(':')[0]}`;
+  const d=phoneOrJid.split('@')[0].split(':')[0].replace(/\D/g,'');
+  return /^55\d{2}9\d{8}$/.test(d)?d.slice(0,4)+d.slice(5):d;
+}
+const customerInviteKeys=(c:{phone:string|null;jid:string})=>[...new Set([c.phone,c.jid].filter(Boolean).map(v=>inviteKey(v!)))];
+async function alreadyInvited(groupId:string,keys:string[]){ return keys.length>0&&!!await prisma.groupInviteSent.findFirst({where:{groupId,who:{in:keys}},select:{id:true}}); }
+const markInvited=(groupId:string,keys:string[])=>prisma.groupInviteSent.createMany({data:keys.map(who=>({groupId,who})),skipDuplicates:true});
 function runInvites(entry:InviteEntry){
   const job=entry.job;
   (async()=>{
@@ -1012,14 +1022,22 @@ function runInvites(entry:InviteEntry){
             const c=await prisma.customer.findUnique({where:{id:t.customerId}});
             // Pediu para parar ou foi bloqueado depois de entrar na fila: pula.
             if(!c||c.optedOut||c.blocked){ job.skipped++; entry.rest.shift(); saveInvite(); continue; }
+            // Já recebeu o convite deste grupo (nesta fila ou numa anterior): pula sem gastar o limite do dia nem a pausa.
+            const keys=customerInviteKeys(c);
+            if(await alreadyInvited(job.groupId,keys)){ job.already=(job.already||0)+1; entry.rest.shift(); saveInvite(); continue; }
             await sendInviteTo(c,renderInvite(job,firstName(c)));
+            await markInvited(job.groupId,keys).catch(()=>{});
             console.log(`[convite] ${t.label}: convite para "${job.groupName}" enviado`);
           }else{
+            if(await alreadyInvited(job.groupId,[inviteKey(t.phone!)])){ job.already=(job.already||0)+1; entry.rest.shift(); saveInvite(); continue; }
             // Telefone digitado/planilha: confere no WhatsApp o endereço real antes de mandar (sem isso a
             // mensagem "sai" e some quando o número não existe ou está cadastrado sem o nono dígito).
             const jid=await resolvePhoneJid(t.phone!);
             if(!jid){ job.failed.push(`${t.label} (sem WhatsApp)`); console.log(`[convite] ${t.label}: número sem WhatsApp`); entry.rest.shift(); saveInvite(); continue; }
+            const keys=[...new Set([inviteKey(t.phone!),inviteKey(jid)])];
+            if(await alreadyInvited(job.groupId,keys)){ job.already=(job.already||0)+1; entry.rest.shift(); saveInvite(); continue; }
             await sendWhatsAppWebText(jid,renderInvite(job,''));
+            await markInvited(job.groupId,keys).catch(()=>{});
             console.log(`[convite] ${t.label} (${jid}): convite para "${job.groupName}" enviado`);
           }
           job.sent++; countInvite();
@@ -1060,9 +1078,15 @@ app.post('/api/customers/invite', requireAuth, asyncRoute(async(req:any,res:any)
   const ok=customers.filter(c=>!c.optedOut&&!c.blocked);
   const known=new Set(customers.map(c=>c.phone).filter(Boolean));
   const phones=[...new Set(body.phones)].filter(p=>!known.has(p));
-  const rest:InviteTarget[]=[...ok.map(c=>({customerId:c.id,label:c.givenName||c.name||(c.phone?`+${c.phone}`:c.jid)})),...phones.map(p=>({phone:p,label:`+${p}`}))];
+  // Quem já recebeu o convite deste grupo não entra na fila (pedido do usuário em 2026-10-09).
+  const invited=new Set((await prisma.groupInviteSent.findMany({where:{groupId:body.groupId},select:{who:true}})).map(r=>r.who));
+  const fresh=ok.filter(c=>!customerInviteKeys(c).some(k=>invited.has(k)));
+  // Mesmo telefone escrito com e sem o nono dígito também conta uma vez só.
+  const freshPhones=[...new Map(phones.filter(p=>!invited.has(inviteKey(p))).map(p=>[inviteKey(p),p])).values()];
+  const rest:InviteTarget[]=[...fresh.map(c=>({customerId:c.id,label:c.givenName||c.name||(c.phone?`+${c.phone}`:c.jid)})),...freshPhones.map(p=>({phone:p,label:`+${p}`}))];
+  const already=ok.length-fresh.length+phones.filter(p=>invited.has(inviteKey(p))).length;
   const now=new Date().toISOString();
-  const job:CustomerInvite={groupId:body.groupId,groupName:body.groupName,text:body.text,link,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,total:rest.length,sent:0,failed:[],skipped:customers.length-ok.length,waitingUntil:null,stopped:false,running:rest.length>0,error:null,startedAt:now,finishedAt:rest.length?null:now};
+  const job:CustomerInvite={groupId:body.groupId,groupName:body.groupName,text:body.text,link,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,total:rest.length,sent:0,failed:[],skipped:customers.length-ok.length,already,waitingUntil:null,stopped:false,running:rest.length>0,error:null,startedAt:now,finishedAt:rest.length?null:now};
   customerInvite={job,rest}; saveInvite();
   if(rest.length) runInvites(customerInvite);
   res.status(202).json(invitePayload());

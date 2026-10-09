@@ -18,7 +18,7 @@ type Bot = { enabled: boolean; everyMinutes: number; maxOffers: number; marketpl
 type Customer = { id: string; jid: string; phone?: string | null; name?: string | null; givenName?: string | null; notes?: string | null; blocked: boolean; optedOut: boolean; requestCount: number; lastRequestAt?: string | null; firstSeenAt: string; lastSeenAt: string; lastRequest?: { keyword?: string | null; status: string; createdAt: string; text: string } | null };
 type Payload = { bot: Bot; link: string | null; waConnected: boolean; waNumber: string | null; customers: Customer[] };
 type Group = { id: string; name: string; participants: number };
-type Invite = { groupName: string; total: number; sent: number; failed: string[]; skipped: number; running: boolean; stopped?: boolean; error: string | null; left?: number; waitingUntil?: string | null; dailyLimit?: number; pauseSec?: number };
+type Invite = { groupName: string; total: number; sent: number; failed: string[]; skipped: number; already?: number; running: boolean; stopped?: boolean; error: string | null; left?: number; waitingUntil?: string | null; dailyLimit?: number; pauseSec?: number };
 type InviteState = { sentToday: number; job: Invite | null };
 // Pausas entre um convite e outro; quanto maior, menor o risco de o WhatsApp bloquear o número.
 const PAUSES = [30, 60, 120, 300, 600, 900, 1800, 3600];
@@ -102,7 +102,9 @@ export default function Customers() {
     try {
       const r = await api.post('/api/customers/invite', { groupId: g.id, groupName: g.name, text: inviteText, customerIds, phones, pauseSec, dailyLimit: limit });
       setInviteState(r.data); setSelected({}); setPhonesText(''); setFile(null);
-      notify(n === 1 ? 'Convite a caminho.' : `Convites a caminho: ${r.data.job?.total ?? n} pessoa(s).`);
+      const total = r.data.job?.total ?? n, already = r.data.job?.already || 0;
+      if (!total && already) notify(already === 1 ? 'Essa pessoa já recebeu o convite deste grupo, então não mandei de novo.' : `Todas as ${already} pessoas já tinham recebido o convite deste grupo, então não mandei de novo.`);
+      else notify(`${total === 1 ? 'Convite a caminho.' : `Convites a caminho: ${total} pessoa(s).`}${already ? ` ${already} já tinham recebido e foram puladas.` : ''}`);
     } catch (e: any) { notify(e?.response?.data?.error || e?.response?.data?.issues?.[0]?.message || 'Não foi possível mandar o convite.', 'error'); }
     finally { setBusy(''); }
   }
@@ -246,7 +248,7 @@ export default function Customers() {
           <small className="muted">Hoje já saíram {inviteState.sentToday} convite(s). A pausa varia um pouco (70% a 150% do escolhido) para não ter ritmo de máquina. Quando o limite do dia acaba, a fila espera a meia-noite e continua sozinha — o sistema precisa ficar ligado. Se reiniciar, continua de onde parou.</small>
           <button className="primary" disabled={!data.waConnected || busy === 'invite' || !allPhones.length || !!invite?.running} onClick={() => sendInvite([], allPhones)} style={{ alignSelf: 'flex-start', marginTop: 10 }}><UserPlus size={15} /> Enviar convite para {allPhones.length || 'os'} telefone(s)</button>
           {invite && <div className="inline-msg" style={{ marginTop: 12 }}>
-            <b>Convites para "{invite.groupName}":</b> {invite.sent} de {invite.total} enviado(s){invite.failed.length ? ` · ${invite.failed.length} com erro` : ''}{invite.skipped ? ` · ${invite.skipped} pulado(s) (pediram para parar ou bloqueados)` : ''}{invite.running ? '…' : '.'}
+            <b>Convites para "{invite.groupName}":</b> {invite.sent} de {invite.total} enviado(s){invite.failed.length ? ` · ${invite.failed.length} com erro` : ''}{invite.already ? ` · ${invite.already} já tinham recebido este convite (pulados)` : ''}{invite.skipped ? ` · ${invite.skipped} pulado(s) (pediram para parar ou bloqueados)` : ''}{invite.running ? '…' : '.'}
             {invite.running && !!invite.left && invite.pauseSec && <div>Faltam {invite.left}: {fmtPlan(invite.left, invite.pauseSec, invite.dailyLimit || 1000, inviteState.sentToday)}.</div>}
             {invite.running && invite.waitingUntil && <div>⏸️ Limite de {invite.dailyLimit} por dia atingido. Continua sozinha {new Date(invite.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })}.</div>}
             {invite.running && (invite.stopped ? <div>Parando…</div> : <button className="outline" style={{ marginTop: 8 }} onClick={stopInvite}><Square size={15} /> Parar convites</button>)}

@@ -337,3 +337,14 @@ model GroupMemberEvent {
   @@unique([groupId, member, kind, at])
   @@index([at])
 }
+
+// Quem já recebeu o convite de cada grupo (pedido do usuário em 2026-10-09): não manda o mesmo convite duas vezes.
+// who = telefone sem o nono dígito (55 + DDD + 8 dígitos), para "44 99999-9999" e "44 9999-9999" contarem como um só;
+// sem telefone, "lid:<id>".
+model GroupInviteSent {
+  id      String   @id @default(cuid())
+  groupId String
+  who     String
+  at      DateTime @default(now())
+  @@unique([groupId, who])
+}
