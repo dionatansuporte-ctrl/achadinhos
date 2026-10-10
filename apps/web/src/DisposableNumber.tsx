@@ -27,7 +27,8 @@ export default function DisposableNumber() {
   // Enquanto pareia, consulta o status a cada 2s para mostrar o QR e perceber a conexão.
   useEffect(() => {
     refresh();
-    timer.current = window.setInterval(() => { setSession(prev => { if (pairing(prev)) refresh(); return prev; }); }, 2000);
+    // Também enquanto o estado ainda não veio (a primeira consulta falhou): senão ficava "Carregando..." para sempre.
+    timer.current = window.setInterval(() => { setSession(prev => { if (!prev || pairing(prev)) refresh(); return prev; }); }, 2000);
     return () => { if (timer.current) window.clearInterval(timer.current); };
   }, []);
 

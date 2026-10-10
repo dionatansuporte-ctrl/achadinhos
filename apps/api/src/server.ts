@@ -34,6 +34,32 @@ import { searchCategories, warmUpCategories } from './services/ml-categories';
 import { getBot, customerLink, sendOffersTo, sendTextTo, sendInviteTo, firstName, startCustomerBot, parseIntent } from './services/customer-bot';
 import { groupGrowth, startGroupGrowth, GROWTH_PERIODS, type GrowthPeriod } from './services/group-growth';
 import QRCode from 'qrcode';
+import { readJson, writeJsonAtomic } from './services/json-file';
+
+// Sem JWT_SECRET a API não pode assinar logins nem conversar com o worker: avisa e não sobe.
+if(!process.env.JWT_SECRET){ console.error('JWT_SECRET não definido em apps/api/.env. Defina uma chave longa e aleatória e reinicie.'); process.exit(1); }
+
+/**
+ * Limite de tentativas por chave (IP, e-mail...) numa janela de tempo, em memória.
+ * Login e recuperação de senha não tinham limite: dava para tentar senhas (ou os códigos de 6 dígitos) sem parar,
+ * principalmente com o túnel do Mercado Livre aberto, que deixa a API visível na internet.
+ */
+function rateLimiter(max:number,windowMs:number){
+  const hits=new Map<string,{n:number;until:number}>();
+  setInterval(()=>{ const now=Date.now(); for(const [k,v] of hits) if(v.until<now) hits.delete(k); },windowMs).unref();
+  return {
+    /** Minutos que faltam para liberar, ou 0 se ainda pode tentar. */
+    blocked(key:string){ const h=hits.get(key); return h&&h.until>Date.now()&&h.n>=max?Math.ceil((h.until-Date.now())/60_000):0; },
+    hit(key:string){ const now=Date.now(); const h=hits.get(key); if(!h||h.until<now) hits.set(key,{n:1,until:now+windowMs}); else h.n++; },
+    clear(key:string){ hits.delete(key); },
+  };
+}
+const loginLimit=rateLimiter(10,15*60_000);   // 10 senhas erradas por IP+e-mail a cada 15 min
+const loginIpLimit=rateLimiter(30,15*60_000); // e 30 por IP (várias contas)
+const forgotLimit=rateLimiter(5,60*60_000);   // 5 pedidos de código por e-mail e por IP a cada hora
+const resetLimit=rateLimiter(20,15*60_000);   // 20 tentativas de código por IP a cada 15 min
+const clientIp=(req:any)=>String(req.ip||req.socket?.remoteAddress||'?');
+const tooMany=(res:any,min:number)=>res.status(429).json({error:`Muitas tentativas. Espere ${min} minuto(s) e tente de novo.`});
 
 const app = express();
 const webUrl=process.env.WEB_URL||'http://127.0.0.1:8080';
@@ -85,8 +111,11 @@ app.post('/api/auth/register', asyncRoute(async (req:any,res:any)=>{
 
 app.post('/api/auth/login', asyncRoute(async (req:any,res:any)=>{
   const body = z.object({email:z.string().email(),password:z.string()}).parse(req.body);
+  const ip=clientIp(req), key=`${ip}|${body.email.toLowerCase()}`;
+  const wait=loginLimit.blocked(key)||loginIpLimit.blocked(ip); if(wait) return tooMany(res,wait);
   const user = await prisma.user.findUnique({where:{email:body.email.toLowerCase()}});
-  if(!user?.passwordHash || !(await verifyPassword(body.password,user.passwordHash))) return res.status(401).json({error:'E-mail ou senha inválidos.'});
+  if(!user?.passwordHash || !(await verifyPassword(body.password,user.passwordHash))){ loginLimit.hit(key); loginIpLimit.hit(ip); return res.status(401).json({error:'E-mail ou senha inválidos.'}); }
+  loginLimit.clear(key);
   if(user.status==='PENDING') return res.status(403).json({error:'Seu cadastro ainda não foi aprovado. Aguarde a liberação do administrador.'});
   if(user.status==='BLOCKED') return res.status(403).json({error:'Seu acesso foi bloqueado. Fale com o administrador.'});
   const token = await issueSession(user.id);
@@ -159,6 +188,9 @@ const RESET_MINUTES=15;
 const resetHash=(userId:string,code:string)=>crypto.createHash('sha256').update(`${userId}:${code}`).digest('hex');
 app.post('/api/auth/forgot', asyncRoute(async(req:any,res:any)=>{
   const body=z.object({email:z.string().trim().email()}).parse(req.body);
+  const fk=`mail|${body.email.toLowerCase()}`, fip=`ip|${clientIp(req)}`;
+  const fwait=forgotLimit.blocked(fk)||forgotLimit.blocked(fip); if(fwait) return tooMany(res,fwait);
+  forgotLimit.hit(fk); forgotLimit.hit(fip);
   if(!(await isMailConfigured())) return res.status(503).json({error:'Envio de e-mail não configurado. Peça ao administrador para preencher o SMTP em Configurações.'});
   const user=await prisma.user.findUnique({where:{email:body.email.toLowerCase()}});
   // Resposta igual com ou sem conta, para não revelar quais e-mails existem.
@@ -173,6 +205,7 @@ app.post('/api/auth/forgot', asyncRoute(async(req:any,res:any)=>{
 }));
 app.post('/api/auth/reset', asyncRoute(async(req:any,res:any)=>{
   const body=z.object({email:z.string().trim().email(),code:z.string().trim().regex(/^\d{6}$/,'Código de 6 dígitos.'),password:z.string().min(8).max(128)}).parse(req.body);
+  const rip=clientIp(req); const rwait=resetLimit.blocked(rip); if(rwait) return tooMany(res,rwait); resetLimit.hit(rip);
   const user=await prisma.user.findUnique({where:{email:body.email.toLowerCase()}});
   const invalid=()=>res.status(400).json({error:'Código inválido ou expirado. Peça um novo.'});
   if(!user) return invalid();
@@ -360,7 +393,19 @@ app.post('/api/automations/:id/generate-jobs', requireAuth, asyncRoute(async(req
 
 // ---------- Backup ----------
 const requireAdmin=(req:any,res:any)=>{ if(!['MASTER','ADMIN'].includes(req.user.role)){ res.status(403).json({error:'Somente administradores.'}); return false; } return true; };
-app.get('/api/backups', requireAuth, asyncRoute(async(req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json({dir:BACKUP_DIR,backups:listBackups()}); }));
+// alert: o backup automático falhou ou não sai há mais de 2 dias. A falha só ia para o console e para um log sem
+// automação, que a tela Histórico não mostra; agora o quadro de Backup avisa.
+app.get('/api/backups', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const backups=listBackups();
+  const lastAuto=backups.filter(b=>b.kind==='auto').reduce<Date|null>((m,b)=>!m||b.createdAt>m?b.createdAt:m,null);
+  const err=await prisma.automationLog.findFirst({where:{action:{in:['BACKUP','CLEANUP']},status:'ERROR',automationId:null,...(lastAuto?{createdAt:{gt:lastAuto}}:{})},orderBy:{createdAt:'desc'}}).catch(()=>null);
+  const stale=!lastAuto||Date.now()-lastAuto.getTime()>2*86_400_000;
+  const alert=err?`O backup automático falhou em ${err.createdAt.toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})}: ${err.message}`
+    :stale?(lastAuto?`O último backup automático é de ${lastAuto.toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})}. Ele roda de madrugada (3h às 6h) e só sai com o computador ligado.`:'Ainda não saiu nenhum backup automático. Ele roda de madrugada (3h às 6h) e só sai com o computador ligado.')
+    :null;
+  res.json({dir:BACKUP_DIR,backups,lastAuto,alert});
+}));
 app.post('/api/backups', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
   try{ res.status(201).json(await createBackup('manual')); }catch(e:any){ res.status(500).json({error:e.message}); }
@@ -375,7 +420,9 @@ app.delete('/api/backups/:file', requireAuth, asyncRoute(async(req:any,res:any)=
 }));
 
 // Vendas e comissões reais (Shopee via conversionReport) para o Dashboard.
+// Vendas e comissão da conta Shopee inteira: só administrador.
 app.get('/api/reports/sales', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
   const period=(['today','7d','30d','month','prev_month'] as const).includes(req.query.period)?req.query.period:'30d';
   if(req.query.refresh==='1') clearSalesCache();
   res.json(await salesReport(period));
@@ -587,7 +634,7 @@ const groupCopies=new Map<string,CopyEntry>();
 // Ficam em disco para sobreviver a um reinício do sistema (senão as pessoas que faltavam se perdiam).
 const COPIES_FILE=path.resolve(__dirname,'../.cache/group-copies.json');
 function saveCopies(){
-  try{ fs.mkdirSync(path.dirname(COPIES_FILE),{recursive:true}); fs.writeFileSync(COPIES_FILE,JSON.stringify([...groupCopies.values()])); }catch{}
+  try{ writeJsonAtomic(COPIES_FILE,[...groupCopies.values()]); }catch(e:any){ console.warn('[importação] não salvou o progresso:',e?.message||e); }
 }
 
 // Limite de pessoas adicionadas por dia (pedido do usuário em 2026-10-04). A contagem soma todas as
@@ -598,7 +645,7 @@ const ADD_COUNT_FILE=path.resolve(__dirname,'../.cache/group-adds.json');
 const spDay=(d=new Date())=>d.toLocaleDateString('en-CA',{timeZone:'America/Sao_Paulo'});
 function readAdds():Record<string,number>{
   try{
-    const j=JSON.parse(fs.readFileSync(ADD_COUNT_FILE,'utf8'));
+    const j=readJson<any>(ADD_COUNT_FILE,{});
     if(j.day!==spDay()) return {};
     return j.by||{principal:Number(j.count)||0}; // arquivo antigo: tudo era do número principal
   }catch{ return {}; }
@@ -610,16 +657,16 @@ function addsToday(session?:string):number{
 }
 function countAdds(n:number,session:string){
   const by=readAdds(); by[session]=(by[session]||0)+n;
-  try{ fs.mkdirSync(path.dirname(ADD_COUNT_FILE),{recursive:true}); fs.writeFileSync(ADD_COUNT_FILE,JSON.stringify({day:spDay(),count:Object.values(by).reduce((a,b)=>a+b,0),by})); }catch{}
+  try{ writeJsonAtomic(ADD_COUNT_FILE,{day:spDay(),count:Object.values(by).reduce((a,b)=>a+b,0),by}); }catch(e:any){ console.warn('[importação] não salvou a contagem do dia:',e?.message||e); }
 }
 // Quem o sistema já adicionou em cada grupo (pedido do usuário em 2026-10-05): numa nova importação
 // essas pessoas são puladas, mesmo que tenham saído do grupo — adicionar de novo quem saiu é o que mais gera denúncia.
 const ADDED_FILE=path.resolve(__dirname,'../.cache/group-added.json');
-function readAdded():Record<string,string[]>{ try{ return JSON.parse(fs.readFileSync(ADDED_FILE,'utf8'))||{}; }catch{ return {}; } }
+function readAdded():Record<string,string[]>{ return readJson<Record<string,string[]>>(ADDED_FILE,{}); }
 function addedBefore(groupId:string){ return new Set(readAdded()[groupId]||[]); }
 function rememberAdded(groupId:string,phones:string[]){
   if(!phones.length) return;
-  try{ const all=readAdded(); all[groupId]=[...new Set([...(all[groupId]||[]),...phones])]; fs.mkdirSync(path.dirname(ADDED_FILE),{recursive:true}); fs.writeFileSync(ADDED_FILE,JSON.stringify(all)); }catch{}
+  try{ const all=readAdded(); all[groupId]=[...new Set([...(all[groupId]||[]),...phones])]; writeJsonAtomic(ADDED_FILE,all); }catch(e:any){ console.warn('[importação] não salvou quem já foi adicionado:',e?.message||e); }
 }
 /** Embaralha uma cópia da lista (Fisher-Yates). */
 function shuffle<T>(list:T[]){ const a=[...list]; for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
@@ -811,7 +858,7 @@ function runGroupCopy(entry:CopyEntry){
 // sozinhos, para ninguém receber a mesma mensagem duas vezes.
 (function loadCopies(){
   let saved:CopyEntry[]=[];
-  try{ saved=JSON.parse(fs.readFileSync(COPIES_FILE,'utf8'))||[]; }catch{ return; }
+  saved=readJson<CopyEntry[]>(COPIES_FILE,[]); if(!Array.isArray(saved)) return;
   for(const e of saved){
     if(!e?.job?.toId||!Array.isArray(e.rest)) continue;
     e.job.startedAt||=e.job.finishedAt||new Date().toISOString();
@@ -936,7 +983,9 @@ async function customersPayload(userId:string){
     customers:customers.map(({requests,...c})=>({...c,lastRequest:requests[0]||null}))};
 }
 app.get('/api/customers', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await customersPayload(req.user.id))));
+// Ligar o atendimento desliga o de outros usuários (a sessão do WhatsApp é uma só): só administrador.
 app.put('/api/customers/bot', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
   const body=z.object({enabled:z.boolean().optional(),everyMinutes:z.coerce.number().int().min(1).max(1440).optional(),maxOffers:z.coerce.number().int().min(1).max(10).optional(),marketplaces:z.array(z.enum(MARKETPLACE_LIST)).min(1).max(3).optional(),askMarketplace:z.boolean().optional(),sendCoupons:z.boolean().optional(),welcomeText:z.string().max(2000).optional().nullable(),linkText:z.string().max(120).optional().nullable(),inviteText:z.string().max(2000).optional().nullable()}).parse(req.body);
   await getBot(req.user.id);
   // A sessão do WhatsApp é uma só: ligar aqui desliga o atendimento de outro usuário que estivesse ligado.
@@ -989,10 +1038,10 @@ type InviteEntry={job:CustomerInvite;rest:InviteTarget[]};
 let customerInvite:InviteEntry|null=null;
 const INVITE_FILE=path.resolve(__dirname,'../.cache/customer-invite.json');
 const INVITE_COUNT_FILE=path.resolve(__dirname,'../.cache/invite-sends.json');
-function saveInvite(){ try{ fs.mkdirSync(path.dirname(INVITE_FILE),{recursive:true}); fs.writeFileSync(INVITE_FILE,JSON.stringify(customerInvite)); }catch{} }
+function saveInvite(){ try{ writeJsonAtomic(INVITE_FILE,customerInvite); }catch(e:any){ console.warn('[convite] não salvou a fila:',e?.message||e); } }
 // Convites mandados hoje (todas as levas), em disco para o limite valer mesmo depois de reiniciar.
-function invitesToday():number{ try{ const j=JSON.parse(fs.readFileSync(INVITE_COUNT_FILE,'utf8')); return j.day===spDay()?Number(j.count)||0:0; }catch{ return 0; } }
-function countInvite(){ try{ fs.mkdirSync(path.dirname(INVITE_COUNT_FILE),{recursive:true}); fs.writeFileSync(INVITE_COUNT_FILE,JSON.stringify({day:spDay(),count:invitesToday()+1})); }catch{} }
+function invitesToday():number{ const j=readJson<any>(INVITE_COUNT_FILE,{}); return j.day===spDay()?Number(j.count)||0:0; }
+function countInvite(){ try{ writeJsonAtomic(INVITE_COUNT_FILE,{day:spDay(),count:invitesToday()+1}); }catch(e:any){ console.warn('[convite] não salvou a contagem do dia:',e?.message||e); } }
 const invitePayload=()=>({sentToday:invitesToday(),job:customerInvite?{...customerInvite.job,left:customerInvite.rest.length}:null});
 // {nome} vira ", Dionatan" (ou some, se o nome não for conhecido); {grupo} e {link} são trocados direto.
 const renderInvite=(job:CustomerInvite,name:string)=>job.text.replaceAll('{link}',job.link).replaceAll('{grupo}',job.groupName).replace(/(,\s*)?\{nome\}/g,(_m,comma)=>name?(comma?`, ${name}`:name):'');
@@ -1061,15 +1110,17 @@ function runInvites(entry:InviteEntry){
 // Ao ligar o sistema: retoma a fila de convites que estava saindo.
 (function loadInvite(){
   let e:InviteEntry|null=null;
-  try{ e=JSON.parse(fs.readFileSync(INVITE_FILE,'utf8')); }catch{ return; }
+  e=readJson<InviteEntry|null>(INVITE_FILE,null); if(!e) return;
   if(!e?.job||!Array.isArray(e.rest)) return;
   customerInvite=e; e.job.waitingUntil=null;
   if(e.job.running){ if(e.job.stopped||!e.rest.length){ e.job.running=false; e.job.finishedAt=new Date().toISOString(); } else runInvites(e); }
 })();
 app.get('/api/customers/invite', requireAuth, (_req:any,res:any)=>res.json(invitePayload()));
 // Para a fila (quem já recebeu, recebeu; o resto não sai mais).
-app.post('/api/customers/invite/stop', requireAuth, (_req:any,res:any)=>{ if(customerInvite?.job.running){ customerInvite.job.stopped=true; saveInvite(); } res.json(invitePayload()); });
+app.post('/api/customers/invite/stop', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; if(customerInvite?.job.running){ customerInvite.job.stopped=true; saveInvite(); } res.json(invitePayload()); });
+// Mensagem em massa pelo número principal: só administrador.
 app.post('/api/customers/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
   const body=z.object({groupId:z.string().endsWith('@g.us'),groupName:z.string().trim().min(1).max(200),text:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem precisa ter {link} no lugar do link do grupo.'),customerIds:z.array(z.string()).max(2000).default([]),phones:z.array(z.string().regex(/^\d{10,15}$/)).max(5000).default([]),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50)}).parse(req.body);
   if(!body.customerIds.length&&!body.phones.length) return res.status(400).json({error:'Marque ao menos um cliente ou carregue/digite telefones.'});
   if(customerInvite?.job.running) return res.status(409).json({error:'Ainda estou mandando os convites anteriores. Pare a fila ou espere terminar.'});
@@ -1098,7 +1149,9 @@ app.post('/api/customers/invite', requireAuth, asyncRoute(async(req:any,res:any)
 
 // Usado pelo worker: a sessão do WhatsApp Web vive só neste processo.
 app.post('/internal/whatsapp/send', asyncRoute(async(req:any,res:any)=>{
-  if(!process.env.JWT_SECRET || req.headers['x-internal-secret']!==process.env.JWT_SECRET) return res.status(401).json({error:'Não autorizado.'});
+  // Comparação em tempo constante: com "!==" dá para descobrir o segredo medindo o tempo de resposta.
+  const given=Buffer.from(String(req.headers['x-internal-secret']||'')), want=Buffer.from(process.env.JWT_SECRET||'');
+  if(!want.length||given.length!==want.length||!crypto.timingSafeEqual(given,want)) return res.status(401).json({error:'Não autorizado.'});
   const body=z.object({jid:z.string(),text:z.string(),imageUrl:httpUrl().optional(),jobId:z.string().optional()}).parse(req.body);
   try{
     // Nova tentativa de um job já entregue (a resposta anterior ao worker se perdeu)? Não manda de novo.

@@ -9,7 +9,10 @@ import { applyDbSecret } from '../db-secret';
  *   db.sql          → banco inteiro (pg_dump com DROP/CREATE, pronto para restaurar)
  *   config/api.env  → credenciais e a TOKEN_ENCRYPTION_KEY (sem ela, nada salvo em Configurações abre)
  *   config/web.env
- *   wa-auth/        → sessão do WhatsApp (evita escanear o QR de novo)
+ *   wa-auth/        → sessão do WhatsApp principal (evita escanear o QR de novo)
+ *   wa-sessions/    → os outros números (n2..n4 e o descartável), uma pasta por número (desde 2026-10-09)
+ *   cache/          → estado das importações e convites: quem já foi adicionado em cada grupo, limite do dia,
+ *                     filas em andamento. Sem ele, depois de restaurar o sistema voltaria a adicionar quem já saiu.
  *   source/         → o código, sem node_modules/dist/logs
  *   manifest.json
  * Usa o pg_dump do PostgreSQL portátil (pasta pgsql), robocopy e Compress-Archive: pensado para Windows.
@@ -88,7 +91,8 @@ async function copySource(to: string) {
   fs.mkdirSync(to, { recursive: true });
   // robocopy: código sem dependências, builds, logs, backups e a própria sessão do WhatsApp (vai à parte).
   const r = await run('robocopy', [ROOT, to, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NC', '/NS', '/NP',
-    '/XD', 'node_modules', 'dist', 'logs', 'backups', '.git', '.wa-auth', 'generated',
+    // .wa-auth* = todas as sessões de WhatsApp (vão à parte, em wa-auth/ e wa-sessions/); .cache vai em cache/.
+    '/XD', 'node_modules', 'dist', 'logs', 'backups', '.git', '.wa-auth*', '.cache', 'generated',
     '/XF', '*.log', '*.zip', '.db-secret', '.db-secret.novo']); // a senha criptografada só abre neste PC: não vai junto
   // robocopy devolve códigos < 8 em sucesso.
   if ((r.status ?? 0) >= 8) throw new Error(`Falha ao copiar o código: ${(r.stderr || r.stdout || '').trim().slice(0, 300)}`);
@@ -119,10 +123,16 @@ export async function createBackup(kind: 'manual' | 'auto' = 'manual'): Promise<
     const dbBytes = await dumpDatabase(path.join(staging, 'db.sql'));
     copyIfExists(path.join(ROOT, 'apps', 'api', '.env'), path.join(staging, 'config', 'api.env'));
     copyIfExists(path.join(ROOT, 'apps', 'web', '.env'), path.join(staging, 'config', 'web.env'));
-    const wa = copyIfExists(path.join(ROOT, 'apps', 'api', '.wa-auth'), path.join(staging, 'wa-auth'));
+    const apiDir = path.join(ROOT, 'apps', 'api');
+    const wa = copyIfExists(path.join(apiDir, '.wa-auth'), path.join(staging, 'wa-auth'));
+    // Os outros números: .wa-auth-n2, .wa-auth-descartavel... (as "-encerrada" são só para investigar, ficam fora).
+    const extra = fs.readdirSync(apiDir).filter(n => /^\.wa-auth-[a-z0-9]+$/i.test(n) && !n.endsWith('-encerrada'));
+    for (const n of extra) copyIfExists(path.join(apiDir, n), path.join(staging, 'wa-sessions', n));
+    copyIfExists(path.join(apiDir, '.cache'), path.join(staging, 'cache'));
+    for (const f of fs.existsSync(path.join(staging, 'cache')) ? fs.readdirSync(path.join(staging, 'cache')) : []) if (f.endsWith('.tmp')) fs.rmSync(path.join(staging, 'cache', f), { force: true });
     await copySource(path.join(staging, 'source'));
     fs.writeFileSync(path.join(staging, 'manifest.json'), JSON.stringify({
-      app: 'Robô das Ofertas', createdAt: now.toISOString(), kind, host: os.hostname(), dbBytes, whatsappSession: wa,
+      app: 'Robô das Ofertas', createdAt: now.toISOString(), kind, host: os.hostname(), dbBytes, whatsappSession: wa, whatsappExtra: extra.map(n => n.slice('.wa-auth-'.length)),
       restore: 'Arraste este .zip sobre o OfertasDaHora.bat (na raiz do projeto) ou use a opção Restaurar do menu. Em outra máquina: extraia source/ para uma pasta e faça o mesmo com o OfertasDaHora.bat de lá.'
     }, null, 2));
     await zipFolder(staging, zipPath);

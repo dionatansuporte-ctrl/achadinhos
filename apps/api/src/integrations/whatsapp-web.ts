@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import pino from 'pino';
 import QRCode from 'qrcode';
+import { readJson, writeJsonAtomic } from '../services/json-file';
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
@@ -67,16 +68,35 @@ export function onGroupMembers(handler: GroupMoveHandler) {
 // Por qual número cada contato falou por último: a resposta no privado sai pelo mesmo número.
 // Fica em disco para valer também depois de reiniciar o sistema.
 const CONTACTS_FILE = path.resolve(__dirname, '../../.cache/wa-contacts.json');
-const lastSessionByJid = new Map<string, string>(Object.entries((() => { try { return JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf8')) || {}; } catch { return {}; } })()));
+const lastSessionByJid = new Map<string, string>(Object.entries(readJson<Record<string, string>>(CONTACTS_FILE, {})));
 let contactsTimer: ReturnType<typeof setTimeout> | null = null;
 function rememberContact(jid: string, id: string) {
   if (lastSessionByJid.get(jid) === id) return;
   lastSessionByJid.set(jid, id);
   contactsTimer ||= setTimeout(() => {
     contactsTimer = null;
-    try { fs.mkdirSync(path.dirname(CONTACTS_FILE), { recursive: true }); fs.writeFileSync(CONTACTS_FILE, JSON.stringify(Object.fromEntries(lastSessionByJid))); } catch { /* sem disco, segue */ }
+    try { writeJsonAtomic(CONTACTS_FILE, Object.fromEntries(lastSessionByJid)); } catch { /* sem disco, segue */ }
   }, 5_000);
 }
+
+// A biblioteca de criptografia do WhatsApp (libsignal) imprime no console cada mensagem que não consegue abrir
+// ("Bad MAC", "Over 2000 messages into the future", "Closing session: {...}") com o stack inteiro. Isso é normal
+// (mensagem de grupo com chave antiga, aparelho que trocou de sessão) e era 90% do logs/api.log, escondendo os
+// erros de verdade. Aqui esses avisos são só contados, e sai um resumo por hora.
+const SIGNAL_NOISE = /^(Session error:|Failed to decrypt message with any known session|Closing open session in favor|Closing session:|Opening session:|Removing old closed session|Decrypted message with closed session|Session already (open|closed)|Migrating session to)/;
+let signalNoise = 0;
+for (const level of ['error', 'warn', 'info'] as const) {
+  const original = console[level].bind(console);
+  console[level] = (...args: any[]) => {
+    if (typeof args[0] === 'string' && SIGNAL_NOISE.test(args[0])) { signalNoise++; return; }
+    original(...args);
+  };
+}
+setInterval(() => {
+  if (!signalNoise) return;
+  console.log(`[whatsapp] ${signalNoise} aviso(s) de criptografia na última hora (mensagens que o WhatsApp não conseguiu abrir; é normal e não afeta os envios).`);
+  signalNoise = 0;
+}, 60 * 60_000).unref();
 
 // Uma exceção solta (de qualquer número) derrubaria o sistema inteiro e, junto, a conexão dos outros números.
 process.on('unhandledRejection', (e: any) => console.error('[whatsapp] erro não tratado (o sistema segue no ar):', e?.message || e));
@@ -145,7 +165,8 @@ class WaSession {
   constructor(readonly id: string) {
     // A lista de grupos fica em disco: com o número fora do ar (ou logo depois de reiniciar), o grupo continua
     // sendo dele, e o envio espera esse número voltar em vez de cair em outro.
-    try { this.groupIds = new Set(JSON.parse(fs.readFileSync(this.groupsFile, 'utf8'))); } catch { /* ainda sem lista */ }
+    const saved = readJson<string[]>(this.groupsFile, []);
+    if (Array.isArray(saved)) this.groupIds = new Set(saved);
   }
 
   get dir() { return authDir(this.id); }
@@ -373,7 +394,7 @@ class WaSession {
     for (const g of list) groupNames.set(g.id, g.name);
     this.groupIds = new Set(list.map(g => g.id));
     this.groupsAt = Date.now();
-    try { fs.writeFileSync(this.groupsFile, JSON.stringify([...this.groupIds])); } catch { /* sem disco, segue */ }
+    try { writeJsonAtomic(this.groupsFile, [...this.groupIds]); } catch { /* sem disco, segue */ }
     return list;
   }
 

@@ -13,6 +13,9 @@ import { ROOT } from './backup';
  *     Na fila (PENDING/PROCESSING) nunca sai;
  *   - CustomerRequest (conversas do atendimento; o cliente e o nome dele ficam);
  *   - sessões vencidas, códigos de senha/OAuth usados ou vencidos;
+ *   - entradas e saídas dos grupos (GroupMemberEvent) com mais de MEMBER_EVENT_DAYS dias: o quadro mostra no
+ *     máximo 30 dias, e cada entrada/saída em cada grupo é uma linha, para sempre (2026-10-09).
+ *     GroupInviteSent NÃO sai: é ele que impede mandar o mesmo convite duas vezes;
  *   - arquivos de log do PostgreSQL antigos; logs do sistema grandes ficam só com o final.
  * O rodízio de termos conta as rodadas no AutomationLog: antes de apagar, a contagem vai para uma linha
  * CURSOR por automação (keywordCursor soma as duas), senão o rodízio voltaria ao primeiro termo.
@@ -20,12 +23,13 @@ import { ROOT } from './backup';
 
 export const CLEANUP_EVERY_DAYS = 5;
 const KEEP_DAYS = 5;
+const MEMBER_EVENT_DAYS = 90;
 const DAY = 86_400_000;
 const LOG_MAX_BYTES = 5 * 1024 * 1024;   // log do sistema acima disso...
 const LOG_KEEP_BYTES = 1024 * 1024;      // ...fica só com o último 1 MB
 const ROUND_ACTIONS = ['RUN', 'GENERATE_JOBS'];
 
-export type CleanupResult = { logs: number; jobs: number; conversations: number; sessions: number; codes: number; files: number; dryRun: boolean };
+export type CleanupResult = { logs: number; jobs: number; conversations: number; sessions: number; codes: number; files: number; memberEvents?: number; dryRun: boolean };
 
 /** Rodadas já apagadas desta automação (linha CURSOR) + as que ainda estão no log: posição do rodízio. */
 export async function roundCount(automationId: string) {
@@ -94,6 +98,10 @@ export async function cleanupDatabase(opts: { dryRun?: boolean; now?: Date } = {
   out.sessions = dry ? await prisma.session.count({ where: sesWhere }) : (await prisma.session.deleteMany({ where: sesWhere })).count;
   const codeWhere = { OR: [{ expiresAt: { lt: now } }, { consumedAt: { not: null } }] };
   out.codes = dry ? await prisma.oAuthState.count({ where: codeWhere }) : (await prisma.oAuthState.deleteMany({ where: codeWhere })).count;
+
+  // 5b) Entradas e saídas dos grupos mais velhas que o quadro consegue mostrar.
+  const evWhere = { at: { lt: new Date(now.getTime() - MEMBER_EVENT_DAYS * DAY) } };
+  out.memberEvents = dry ? await prisma.groupMemberEvent.count({ where: evWhere }) : (await prisma.groupMemberEvent.deleteMany({ where: evWhere })).count;
 
   // 6) Arquivos: logs diários do PostgreSQL antigos; logs do sistema grandes ficam só com o final.
   out.files += cleanPgLogs(cutoff, dry);

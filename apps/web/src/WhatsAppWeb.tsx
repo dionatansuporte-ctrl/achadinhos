@@ -27,7 +27,8 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
   useEffect(() => {
     refresh();
     timer.current = window.setInterval(() => {
-      setSessions(prev => { if (prev.some(pairing)) refresh(); return prev; });
+      // Também enquanto a lista ainda não veio (a primeira consulta falhou): senão a tela ficava vazia até recarregar.
+      setSessions(prev => { if (!prev.length || prev.some(pairing)) refresh(); return prev; });
     }, 2000);
     return () => { if (timer.current) window.clearInterval(timer.current); };
   }, []);

@@ -10,8 +10,9 @@ echo ================================================================
 echo   Robo das Ofertas - RESTAURAR BACKUP
 echo ================================================================
 echo.
-echo  Isto substitui o banco de dados, as credenciais (.env) e a sessao
-echo  do WhatsApp desta instalacao pelo conteudo do backup.
+echo  Isto substitui o banco de dados, as credenciais (.env), as sessoes
+echo  do WhatsApp e o historico das importacoes desta instalacao pelo
+echo  conteudo do backup.
 echo.
 
 rem --- escolhe o .zip: argumento (arraste o arquivo sobre este .bat) ou o mais novo em backups\
@@ -48,6 +49,16 @@ if exist "%TMPD%\config\web.env" copy /y "%TMPD%\config\web.env" "%ROOT%\apps\we
 if exist "%TMPD%\wa-auth" (
   rmdir /s /q "%ROOT%\apps\api\.wa-auth" >nul 2>&1
   xcopy /e /i /q /y "%TMPD%\wa-auth" "%ROOT%\apps\api\.wa-auth" >nul
+)
+rem Outros numeros (n2..n4 e o descartavel): cada pasta de wa-sessions volta para apps\api\.wa-auth-xxx
+if exist "%TMPD%\wa-sessions" for /d %%D in ("%TMPD%\wa-sessions\*") do (
+  rmdir /s /q "%ROOT%\apps\api\%%~nxD" >nul 2>&1
+  xcopy /e /i /q /y "%%~fD" "%ROOT%\apps\api\%%~nxD" >nul
+)
+rem Estado das importacoes e convites (quem ja foi adicionado em cada grupo, limite do dia, filas)
+if exist "%TMPD%\cache" (
+  rmdir /s /q "%ROOT%\apps\api\.cache" >nul 2>&1
+  xcopy /e /i /q /y "%TMPD%\cache" "%ROOT%\apps\api\.cache" >nul
 )
 
 rem --- dependencias (primeira vez em outra maquina)

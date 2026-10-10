@@ -240,6 +240,11 @@ model PromotionJob {
   channel      Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
   createdAt    DateTime     @default(now())
   @@index([status, scheduledAt])
+  // Consultas da tela Envios, do dashboard, da regra "não repetir produto no grupo" e da limpeza (2026-10-09).
+  @@index([channelId, createdAt])
+  @@index([automationId, createdAt])
+  @@index([createdAt])
+  @@index([productId])
 }
 
 model AutomationLog {
@@ -298,6 +303,9 @@ model CustomerRequest {
   createdAt  DateTime @default(now())
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   @@index([customerId, createdAt])
+  // Busca de pedidos pendentes a cada 30 s e limpeza por data (2026-10-09).
+  @@index([status, createdAt])
+  @@index([createdAt])
 }
 
 // Configuração do atendimento (uma por usuário). everyMinutes = limite por tempo por cliente.

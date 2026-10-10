@@ -109,8 +109,11 @@ export default function Customers() {
     finally { setBusy(''); }
   }
 
-  const load = () => api.get('/api/customers').then(r => { setData(r.data); setBot(r.data.bot); }).catch(() => {});
+  // Falhou o carregamento: mostra o motivo e tenta de novo em 5 s (antes ficava "Carregando..." até 30 s, calado).
+  const [loadError, setLoadError] = useState('');
+  const load = () => api.get('/api/customers').then(r => { setData(r.data); setBot(r.data.bot); setLoadError(''); }).catch((e: any) => setLoadError(e?.response?.data?.error || 'Não consegui falar com o sistema.'));
   useEffect(() => { load(); const t = setInterval(load, 30_000); return () => clearInterval(t); }, []);
+  useEffect(() => { if (!loadError || data) return; const t = setTimeout(load, 5_000); return () => clearTimeout(t); }, [loadError, data]);
 
   // Mensagem do convite: carrega a salva uma vez e salva sozinha 1 s depois de parar de digitar.
   useEffect(() => { if (data && inviteText === null) { const t = data.bot.inviteText || DEFAULT_INVITE; savedInvite.current = t; setInviteText(t); } }, [data]);
@@ -158,7 +161,7 @@ export default function Customers() {
   const intentText = (i: any) => !i ? '' : i.kind === 'SEARCH' ? (i.details ? `Pedido genérico: o robô pergunta ${i.details.items.map((x: string) => x.replace(/\s*\(.*$/, '')).join(', ')} de "${i.keyword}"${asksStore ? ', depois a loja,' : ''} e busca com a resposta` : `Busca por "${i.keyword}"${i.marketplace ? ` só na ${mktLabel(i.marketplace)}` : asksStore ? ' (robô pergunta a loja antes)' : ''}${i.wantsCoupons ? ' + cupons' : ''}`) : i.kind === 'COUPONS' ? (i.marketplace ? `Cupons: ${mktLabel(i.marketplace)}` : 'Cupons (robô pergunta a loja)') : i.kind === 'MARKETPLACE' ? `Resposta "qual loja": ${mktLabel(i.marketplace)}` : i.kind === 'OPT_OUT' ? 'Cliente pede para parar (não recebe mais nada)' : i.kind === 'OPT_IN' ? 'Cliente volta a receber' : 'Boas-vindas / ajuda';
   const list = (data?.customers || []).filter(c => { const f = filter.trim().toLowerCase(); return !f || (c.name || '').toLowerCase().includes(f) || (c.givenName || '').toLowerCase().includes(f) || (c.phone || '').includes(f.replace(/\D/g, '')) || (c.lastRequest?.keyword || '').toLowerCase().includes(f); });
 
-  if (!data || !bot) return <section className="page"><h1>Clientes</h1><div className="loading">Carregando...</div></section>;
+  if (!data || !bot) return <section className="page"><h1>Clientes</h1><div className="loading">{loadError ? `${loadError} Tentando de novo...` : 'Carregando...'}</div></section>;
 
   return <section className="page">
     <div className="page-title-row"><div><h1>Clientes</h1><p>Quem fala com você no privado do WhatsApp recebe ofertas só pra ele. Divulgue o link, o cliente escreve o que procura e o robô responde.</p></div>

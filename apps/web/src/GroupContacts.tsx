@@ -82,7 +82,7 @@ export default function GroupContacts({ groups, sessions, cautious = false }: { 
 
   // A API devolve todas as importações ({ jobs, addedToday }).
   const applyCopies = (data: any) => { setAddedToday(data?.addedToday || 0); setCopies(Array.isArray(data?.jobs) ? data.jobs : []); };
-  const loadCopy = () => api.get('/api/whatsapp/groups/copy').then(r => applyCopies(r.data)).catch(() => {});
+  const loadCopy = () => api.get('/api/whatsapp/groups/copy').then(r => applyCopies(r.data)).catch((e: any) => setMsg(e?.response?.data?.error || 'Não consegui carregar as importações. Atualize a página em instantes.'));
   useEffect(() => { loadCopy(); }, []);
   // Enquanto alguma importação ou convite roda, atualiza o progresso a cada 5s.
   const working = copies.some(c => c.running || c.invite?.running);

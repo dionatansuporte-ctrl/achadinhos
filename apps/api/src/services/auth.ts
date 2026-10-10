@@ -3,7 +3,12 @@ import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../db';
 
-const secret = () => process.env.JWT_SECRET || 'dev-only-change-me';
+// Sem JWT_SECRET os tokens seriam assinados com uma chave conhecida por qualquer um: melhor não subir.
+const secret = () => {
+  const s = process.env.JWT_SECRET;
+  if (!s) throw new Error('JWT_SECRET não definido em apps/api/.env. Defina uma chave longa e aleatória e reinicie.');
+  return s;
+};
 
 export async function hashPassword(password: string) { return bcrypt.hash(password, 12); }
 export async function verifyPassword(password: string, hash: string) { return bcrypt.compare(password, hash); }
@@ -17,15 +22,19 @@ export async function issueSession(userId: string) {
   return token;
 }
 
+/**
+ * Usuário do token, ou null se o token não vale (assinatura errada, expirado, sessão encerrada, usuário bloqueado).
+ * Erro do banco NÃO vira null: antes um soluço no Postgres respondia 401 e o painel deslogava todo mundo.
+ * Agora o erro sobe e o requireAuth responde 503 ("tente de novo"), sem apagar o login.
+ */
 export async function getUserFromToken(token?: string) {
   if (!token) return null;
-  try {
-    const payload = jwt.verify(token, secret()) as jwt.JwtPayload;
-    if (!payload.sub || typeof payload.sid !== 'string') return null;
-    const session = await prisma.session.findUnique({ where: { tokenHash: payload.sid }, include: { user: true } });
-    if (!session || session.expiresAt < new Date()) return null;
-    // Bloqueado ou ainda não aprovado: a sessão não vale, mesmo que exista.
-    if (session.user.status !== 'ACTIVE') return null;
-    return session.user;
-  } catch { return null; }
+  let payload: jwt.JwtPayload;
+  try { payload = jwt.verify(token, secret()) as jwt.JwtPayload; } catch { return null; }
+  if (!payload.sub || typeof payload.sid !== 'string') return null;
+  const session = await prisma.session.findUnique({ where: { tokenHash: payload.sid }, include: { user: true } });
+  if (!session || session.expiresAt < new Date()) return null;
+  // Bloqueado ou ainda não aprovado: a sessão não vale, mesmo que exista.
+  if (session.user.status !== 'ACTIVE') return null;
+  return session.user;
 }

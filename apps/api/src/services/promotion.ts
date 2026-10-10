@@ -2,6 +2,7 @@ import { prisma } from '../db';
 import { sendWhatsAppText } from '../integrations/whatsapp';
 import { publishInstagramImage } from '../integrations/instagram';
 import { shopeeTrackedLink } from '../integrations/shopee';
+import { isOfflineError } from '../queue';
 
 /**
  * Grupos de WhatsApp saem pela sessão Baileys, que vive só no processo da API
@@ -45,7 +46,9 @@ export async function executePromotionJob(jobId:string){
     else { if(!payload.imageUrl) throw new Error('Instagram exige imageUrl pública para publicação.'); await publishInstagramImage(payload.imageUrl,payload.text||''); }
   }catch(e:any){
     await prisma.promotionJob.update({where:{id:jobId},data:{status:'FAILED',errorMessage:e.message}}).catch(()=>{});
-    await prisma.automationLog.create({data:{automationId:job.automationId,channel:job.channel.type,action:'SEND',status:'ERROR',message:e.message}}).catch(()=>{}); throw e;
+    // WhatsApp fora do ar: a fila espera ele voltar; não enche o Histórico com um erro por minuto.
+    if(!isOfflineError(e)) await prisma.automationLog.create({data:{automationId:job.automationId,channel:job.channel.type,action:'SEND',status:'ERROR',message:e.message}}).catch(()=>{});
+    throw e;
   }
   // Já saiu: daqui em diante um erro do banco NÃO pode virar FAILED, senão a fila tenta de novo e manda em dobro.
   await prisma.promotionJob.update({where:{id:jobId},data:{status:'SENT',sentAt:new Date(),errorMessage:null}})
