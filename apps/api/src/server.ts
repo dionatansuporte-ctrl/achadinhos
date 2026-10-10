@@ -1033,7 +1033,7 @@ app.post('/api/customers/:id/send', requireAuth, asyncRoute(async(req:any,res:an
 // A fila fica em disco para continuar de onde parou se o sistema reiniciar.
 type InviteTarget={customerId?:string;phone?:string;label:string};
 // already: quantos foram pulados porque já tinham recebido o convite deste grupo antes.
-type CustomerInvite={groupId:string;groupName:string;text:string;link:string;pauseSec:number;dailyLimit:number;total:number;sent:number;failed:string[];skipped:number;already?:number;waitingUntil:string|null;stopped:boolean;running:boolean;error:string|null;startedAt:string;finishedAt:string|null};
+type CustomerInvite={groupId:string;groupName:string;text:string;link:string;pauseSec:number;dailyLimit:number;total:number;sent:number;failed:string[];skipped:number;already?:number;waitingUntil:string|null;stopped:boolean;running:boolean;error:string|null;startedAt:string;finishedAt:string|null;session?:string|null;sessionPhone?:string|null};
 type InviteEntry={job:CustomerInvite;rest:InviteTarget[]};
 let customerInvite:InviteEntry|null=null;
 const INVITE_FILE=path.resolve(__dirname,'../.cache/customer-invite.json');
@@ -1056,6 +1056,9 @@ async function alreadyInvited(groupId:string,keys:string[]){ return keys.length>
 const markInvited=(groupId:string,keys:string[])=>prisma.groupInviteSent.createMany({data:keys.map(who=>({groupId,who})),skipDuplicates:true});
 function runInvites(entry:InviteEntry){
   const job=entry.job;
+  // Número que manda os convites (escolhido na tela, pedido do usuário em 2026-10-09); sem ele, o de sempre de cada cliente.
+  const via=job.session||undefined;
+  const up=()=>via?getWaState(via).status==='connected':anyWaConnected();
   (async()=>{
     try{
       // Espera em fatias curtas para o "Parar" responder logo.
@@ -1068,7 +1071,8 @@ function runInvites(entry:InviteEntry){
           job.waitingUntil=null; continue;
         }
         // WhatsApp caiu: espera voltar e segue de onde estava.
-        if(!anyWaConnected()){ await wait(30_000,()=>anyWaConnected()); continue; }
+        // Com número escolhido, espera aquele número (não troca sozinho por outro).
+        if(!up()){ await wait(30_000,up); continue; }
         const t=entry.rest[0];
         try{
           if(t.customerId){
@@ -1078,18 +1082,18 @@ function runInvites(entry:InviteEntry){
             // Já recebeu o convite deste grupo (nesta fila ou numa anterior): pula sem gastar o limite do dia nem a pausa.
             const keys=customerInviteKeys(c);
             if(await alreadyInvited(job.groupId,keys)){ job.already=(job.already||0)+1; entry.rest.shift(); saveInvite(); continue; }
-            await sendInviteTo(c,renderInvite(job,firstName(c)));
+            await sendInviteTo(c,renderInvite(job,firstName(c)),via);
             await markInvited(job.groupId,keys).catch(()=>{});
             console.log(`[convite] ${t.label}: convite para "${job.groupName}" enviado`);
           }else{
             if(await alreadyInvited(job.groupId,[inviteKey(t.phone!)])){ job.already=(job.already||0)+1; entry.rest.shift(); saveInvite(); continue; }
             // Telefone digitado/planilha: confere no WhatsApp o endereço real antes de mandar (sem isso a
             // mensagem "sai" e some quando o número não existe ou está cadastrado sem o nono dígito).
-            const jid=await resolvePhoneJid(t.phone!);
+            const jid=await resolvePhoneJid(t.phone!,via);
             if(!jid){ job.failed.push(`${t.label} (sem WhatsApp)`); console.log(`[convite] ${t.label}: número sem WhatsApp`); entry.rest.shift(); saveInvite(); continue; }
             const keys=[...new Set([inviteKey(t.phone!),inviteKey(jid)])];
             if(await alreadyInvited(job.groupId,keys)){ job.already=(job.already||0)+1; entry.rest.shift(); saveInvite(); continue; }
-            await sendWhatsAppWebText(jid,renderInvite(job,''));
+            await sendWhatsAppWebText(jid,renderInvite(job,''),undefined,via);
             await markInvited(job.groupId,keys).catch(()=>{});
             console.log(`[convite] ${t.label} (${jid}): convite para "${job.groupName}" enviado`);
           }
@@ -1121,10 +1125,14 @@ app.post('/api/customers/invite/stop', requireAuth, (req:any,res:any)=>{ if(!req
 // Mensagem em massa pelo número principal: só administrador.
 app.post('/api/customers/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
-  const body=z.object({groupId:z.string().endsWith('@g.us'),groupName:z.string().trim().min(1).max(200),text:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem precisa ter {link} no lugar do link do grupo.'),customerIds:z.array(z.string()).max(2000).default([]),phones:z.array(z.string().regex(/^\d{10,15}$/)).max(5000).default([]),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50)}).parse(req.body);
+  const body=z.object({groupId:z.string().endsWith('@g.us'),groupName:z.string().trim().min(1).max(200),text:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem precisa ter {link} no lugar do link do grupo.'),customerIds:z.array(z.string()).max(2000).default([]),phones:z.array(z.string().regex(/^\d{10,15}$/)).max(5000).default([]),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50),session:SESSION_ID.optional()}).parse(req.body);
   if(!body.customerIds.length&&!body.phones.length) return res.status(400).json({error:'Marque ao menos um cliente ou carregue/digite telefones.'});
   if(customerInvite?.job.running) return res.status(409).json({error:'Ainda estou mandando os convites anteriores. Pare a fila ou espere terminar.'});
   if(!anyWaConnected()) return res.status(409).json({error:'WhatsApp não conectado. Escaneie o QR code em Canais.'});
+  // Número que manda (pedido do usuário em 2026-10-09). O descartável não manda convite: ele só adiciona contatos.
+  const sender=body.session?listWaSessions().find(s=>s.id===body.session):undefined;
+  if(body.session&&(!sender||sender.disposable)) return res.status(409).json({error:'Esse número não pode mandar convites. Escolha outro.'});
+  if(sender&&sender.status!=='connected') return res.status(409).json({error:`O número +${sender.me?.id||body.session} não está conectado agora. Escolha outro ou espere ele voltar.`});
   let link:string;
   try{ link=await groupInviteLink(body.groupId); }
   catch(e:any){ return res.status(409).json({error:/not-authorized|forbidden/i.test(String(e?.message||e))?`Você precisa ser administrador do grupo "${body.groupName}" para pegar o link de convite.`:e.message}); }
@@ -1141,7 +1149,7 @@ app.post('/api/customers/invite', requireAuth, asyncRoute(async(req:any,res:any)
   const rest:InviteTarget[]=[...fresh.map(c=>({customerId:c.id,label:c.givenName||c.name||(c.phone?`+${c.phone}`:c.jid)})),...freshPhones.map(p=>({phone:p,label:`+${p}`}))];
   const already=ok.length-fresh.length+phones.filter(p=>invited.has(inviteKey(p))).length;
   const now=new Date().toISOString();
-  const job:CustomerInvite={groupId:body.groupId,groupName:body.groupName,text:body.text,link,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,total:rest.length,sent:0,failed:[],skipped:customers.length-ok.length,already,waitingUntil:null,stopped:false,running:rest.length>0,error:null,startedAt:now,finishedAt:rest.length?null:now};
+  const job:CustomerInvite={groupId:body.groupId,groupName:body.groupName,text:body.text,link,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,total:rest.length,sent:0,failed:[],skipped:customers.length-ok.length,already,waitingUntil:null,stopped:false,running:rest.length>0,error:null,startedAt:now,finishedAt:rest.length?null:now,session:sender?.id||null,sessionPhone:sender?.me?.id||null};
   customerInvite={job,rest}; saveInvite();
   if(rest.length) runInvites(customerInvite);
   res.status(202).json(invitePayload());

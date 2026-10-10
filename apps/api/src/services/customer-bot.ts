@@ -265,9 +265,10 @@ async function log(customerId: string, data: { text: string; keyword?: string | 
   return prisma.customerRequest.create({ data: { customerId, ...data, offersJson: data.offersJson ?? undefined } });
 }
 
-async function reply(jid: string, text: string, imageUrl?: string) {
-  await showTyping(jid, Math.min(4000, 800 + text.length * 8));
-  await sendWhatsAppWebText(jid, text, imageUrl);
+// via: número que manda (sem ele, o mesmo pelo qual o cliente falou por último).
+async function reply(jid: string, text: string, imageUrl?: string, via?: string) {
+  await showTyping(jid, Math.min(4000, 800 + text.length * 8), via);
+  await sendWhatsAppWebText(jid, text, imageUrl, via);
 }
 
 /** Texto de uma oferta para o cliente, com o cupom do marketplace se houver um válido que caiba. */
@@ -525,8 +526,8 @@ export async function sendTextTo(customer: Customer, text: string) {
 }
 
 /** Convite para entrar no grupo de ofertas (tela Clientes, 2026-10-08): fica no histórico como INVITE. */
-export async function sendInviteTo(customer: Customer, text: string) {
-  await reply(customer.jid, text);
+export async function sendInviteTo(customer: Customer, text: string, via?: string) {
+  await reply(customer.jid, text, undefined, via);
   await log(customer.id, { text: '(convite para o grupo)', status: 'INVITE', replyText: text });
 }
 

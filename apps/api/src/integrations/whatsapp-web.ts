@@ -540,8 +540,8 @@ async function groupSession(groupId: string, via?: string) {
 }
 
 /** Mostra "digitando..." por alguns segundos antes de responder um cliente, para parecer natural. */
-export async function showTyping(jid: string, ms = 1500) {
-  const s = session(await sessionForJid(jid));
+export async function showTyping(jid: string, ms = 1500, via?: string) {
+  const s = session(via || await sessionForJid(jid));
   if (!s.sock || s.status !== 'connected') return;
   try {
     await s.sock.sendPresenceUpdate('composing', jid);

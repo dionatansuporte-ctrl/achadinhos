@@ -18,7 +18,9 @@ type Bot = { enabled: boolean; everyMinutes: number; maxOffers: number; marketpl
 type Customer = { id: string; jid: string; phone?: string | null; name?: string | null; givenName?: string | null; notes?: string | null; blocked: boolean; optedOut: boolean; requestCount: number; lastRequestAt?: string | null; firstSeenAt: string; lastSeenAt: string; lastRequest?: { keyword?: string | null; status: string; createdAt: string; text: string } | null };
 type Payload = { bot: Bot; link: string | null; waConnected: boolean; waNumber: string | null; customers: Customer[] };
 type Group = { id: string; name: string; participants: number };
-type Invite = { groupName: string; total: number; sent: number; failed: string[]; skipped: number; already?: number; running: boolean; stopped?: boolean; error: string | null; left?: number; waitingUntil?: string | null; dailyLimit?: number; pauseSec?: number };
+type Invite = { groupName: string; total: number; sent: number; failed: string[]; skipped: number; already?: number; running: boolean; stopped?: boolean; error: string | null; left?: number; waitingUntil?: string | null; dailyLimit?: number; pauseSec?: number; sessionPhone?: string | null };
+type WaNumber = { id: string; main: boolean; disposable?: boolean; status: string; me?: { id: string; name?: string } | null };
+const VIA_KEY = 'convite-numero';
 type InviteState = { sentToday: number; job: Invite | null };
 // Pausas entre um convite e outro; quanto maior, menor o risco de o WhatsApp bloquear o número.
 const PAUSES = [30, 60, 120, 300, 600, 900, 1800, 3600];
@@ -69,6 +71,14 @@ export default function Customers() {
   const [file, setFile] = useState<{ name: string; phones: string[]; skipped: number } | null>(null);
   const [pauseSec, setPauseSec] = useState(60);
   const [dailyLimit, setDailyLimit] = useState(50);
+  // Número que manda os convites (pedido do usuário em 2026-10-09): fica lembrado neste navegador.
+  const [numbers, setNumbers] = useState<WaNumber[]>([]);
+  const [via, setViaState] = useState(() => { try { return localStorage.getItem(VIA_KEY) || ''; } catch { return ''; } });
+  const setVia = (id: string) => { setViaState(id); try { localStorage.setItem(VIA_KEY, id); } catch { /* ignora */ } };
+  const senders = numbers.filter(n => !n.disposable && n.status === 'connected' && n.me?.id);
+  // Número lembrado que caiu: usa o principal (ou o primeiro conectado) até ele voltar.
+  const viaId = senders.some(n => n.id === via) ? via : (senders.find(n => n.main) || senders[0])?.id || '';
+  const viaPhone = senders.find(n => n.id === viaId)?.me?.id;
   // Telefones do arquivo + os digitados, sem repetir.
   const typed = parsePhones(phonesText).phones;
   const allPhones = [...new Set([...(file?.phones || []), ...typed])];
@@ -86,7 +96,8 @@ export default function Customers() {
 
   const loadGroups = () => api.get('/api/whatsapp/groups').then(r => { setGroups(r.data); setGroupId(g => g || r.data[0]?.id || ''); }).catch(() => setGroups([]));
   const loadInvite = () => api.get('/api/customers/invite').then(r => setInviteState(r.data)).catch(() => {});
-  useEffect(() => { loadGroups(); loadInvite(); }, []);
+  const loadNumbers = () => api.get('/api/whatsapp/status').then(r => setNumbers(r.data.sessions || [])).catch(() => {});
+  useEffect(() => { loadGroups(); loadInvite(); loadNumbers(); const t = setInterval(loadNumbers, 30_000); return () => clearInterval(t); }, []);
   // Enquanto os convites saem, acompanha a cada 5 s.
   useEffect(() => { if (!invite?.running) return; const t = setInterval(loadInvite, 5000); return () => clearInterval(t); }, [invite?.running]);
 
@@ -97,10 +108,11 @@ export default function Customers() {
     const n = customerIds.length + phones.length;
     if (!n) return notify('Marque ao menos um cliente ou digite um telefone.', 'error');
     const limit = Math.min(1000, Math.max(1, Math.round(dailyLimit) || 50));
-    if (n > 1 && !confirm(`Mandar o convite de "${g.name}" para ${n} pessoa(s)?\n\nVai uma mensagem de cada vez, com ${fmtPause(pauseSec)} entre elas (variando um pouco) e no máximo ${limit} por dia — leva ${fmtPlan(n, pauseSec, limit, inviteState.sentToday)}. O sistema precisa ficar ligado.`)) return;
+    if (!viaId) return notify('Nenhum número conectado para mandar o convite. Conecte um em Canais.', 'error');
+    if (n > 1 && !confirm(`Mandar o convite de "${g.name}" para ${n} pessoa(s) pelo número +${viaPhone}?\n\nVai uma mensagem de cada vez, com ${fmtPause(pauseSec)} entre elas (variando um pouco) e no máximo ${limit} por dia — leva ${fmtPlan(n, pauseSec, limit, inviteState.sentToday)}. O sistema precisa ficar ligado.`)) return;
     setBusy('invite');
     try {
-      const r = await api.post('/api/customers/invite', { groupId: g.id, groupName: g.name, text: inviteText, customerIds, phones, pauseSec, dailyLimit: limit });
+      const r = await api.post('/api/customers/invite', { groupId: g.id, groupName: g.name, text: inviteText, customerIds, phones, pauseSec, dailyLimit: limit, session: viaId });
       setInviteState(r.data); setSelected({}); setPhonesText(''); setFile(null);
       const total = r.data.job?.total ?? n, already = r.data.job?.already || 0;
       if (!total && already) notify(already === 1 ? 'Essa pessoa já recebeu o convite deste grupo, então não mandei de novo.' : `Todas as ${already} pessoas já tinham recebido o convite deste grupo, então não mandei de novo.`);
@@ -223,6 +235,15 @@ export default function Customers() {
               <button className="outline" onClick={loadGroups} title="Atualizar grupos"><RefreshCw size={16} /></button>
             </div>
             <small>Você precisa ser administrador do grupo para o sistema pegar o link de convite.</small></div>
+          <div className="env-field"><label>Enviar pelo número</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <select value={viaId} onChange={e => setVia(e.target.value)} style={{ flex: 1 }} disabled={!senders.length}>
+                {!senders.length && <option value="">Nenhum número conectado</option>}
+                {senders.map(n => <option key={n.id} value={n.id}>+{n.me!.id}{n.me!.name ? ` · ${n.me!.name}` : ''}{n.main ? ' (principal)' : ''}</option>)}
+              </select>
+              <button className="outline" onClick={loadNumbers} title="Atualizar números"><RefreshCw size={16} /></button>
+            </div>
+            <small>{viaPhone ? <>Os convites saem do <b>+{viaPhone}</b>. O link do grupo vem de um número que é administrador dele. Se esse número cair no meio, a fila espera ele voltar — não troca sozinha.</> : 'Conecte um número em Canais.'}</small></div>
           <div className="env-field"><label>Mensagem do convite (use {'{nome}'}, {'{grupo}'} e {'{link}'})</label>
             <textarea rows={11} value={inviteText ?? ''} onChange={e => setInviteText(e.target.value)} />
             <small>{inviteSave === 'saving' ? 'Salvando...' : inviteSave === 'saved' ? '✓ Salvo automaticamente' : inviteSave === 'error' ? 'Não foi possível salvar, tente de novo.' : 'Salva sozinha enquanto você digita.'}
@@ -249,9 +270,9 @@ export default function Customers() {
             </label>
           </div>
           <small className="muted">Hoje já saíram {inviteState.sentToday} convite(s). A pausa varia um pouco (70% a 150% do escolhido) para não ter ritmo de máquina. Quando o limite do dia acaba, a fila espera a meia-noite e continua sozinha — o sistema precisa ficar ligado. Se reiniciar, continua de onde parou.</small>
-          <button className="primary" disabled={!data.waConnected || busy === 'invite' || !allPhones.length || !!invite?.running} onClick={() => sendInvite([], allPhones)} style={{ alignSelf: 'flex-start', marginTop: 10 }}><UserPlus size={15} /> Enviar convite para {allPhones.length || 'os'} telefone(s)</button>
+          <button className="primary" disabled={!data.waConnected || busy === 'invite' || !allPhones.length || !!invite?.running} onClick={() => sendInvite([], allPhones)} style={{ alignSelf: 'flex-start', marginTop: 10 }}><UserPlus size={15} /> Enviar convite para {allPhones.length || 'os'} telefone(s){viaPhone ? ` pelo +${viaPhone}` : ''}</button>
           {invite && <div className="inline-msg" style={{ marginTop: 12 }}>
-            <b>Convites para "{invite.groupName}":</b> {invite.sent} de {invite.total} enviado(s){invite.failed.length ? ` · ${invite.failed.length} com erro` : ''}{invite.already ? ` · ${invite.already} já tinham recebido este convite (pulados)` : ''}{invite.skipped ? ` · ${invite.skipped} pulado(s) (pediram para parar ou bloqueados)` : ''}{invite.running ? '…' : '.'}
+            <b>Convites para "{invite.groupName}"{invite.sessionPhone ? ` pelo número +${invite.sessionPhone}` : ''}:</b> {invite.sent} de {invite.total} enviado(s){invite.failed.length ? ` · ${invite.failed.length} com erro` : ''}{invite.already ? ` · ${invite.already} já tinham recebido este convite (pulados)` : ''}{invite.skipped ? ` · ${invite.skipped} pulado(s) (pediram para parar ou bloqueados)` : ''}{invite.running ? '…' : '.'}
             {invite.running && !!invite.left && invite.pauseSec && <div>Faltam {invite.left}: {fmtPlan(invite.left, invite.pauseSec, invite.dailyLimit || 1000, inviteState.sentToday)}.</div>}
             {invite.running && invite.waitingUntil && <div>⏸️ Limite de {invite.dailyLimit} por dia atingido. Continua sozinha {new Date(invite.waitingUntil).toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit' })}.</div>}
             {invite.running && (invite.stopped ? <div>Parando…</div> : <button className="outline" style={{ marginTop: 8 }} onClick={stopInvite}><Square size={15} /> Parar convites</button>)}

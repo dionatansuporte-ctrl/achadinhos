@@ -56,7 +56,8 @@ export default function GroupContacts({ groups, sessions, cautious = false }: { 
   const [via, setVia] = useState('');
   // Salvar na agenda temporariamente antes de adicionar (quem tem privacidade "só meus contatos" aceita assim).
   const [tempContacts, setTempContacts] = useState(true);
-  const multi = sessions.length > 1;
+  // Mostra o seletor de número sempre, mesmo com um só (pedido do usuário em 2026-10-09: saber qual está adicionando).
+  const multi = sessions.length > 0;
   /** Números conectados que estão no grupo (sem a informação, todos), administradores primeiro. */
   const candidatesFor = (groupId: string) => {
     const g = groups.find(x => x.id === groupId);
