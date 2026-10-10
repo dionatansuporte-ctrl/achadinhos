@@ -5,8 +5,9 @@ import GroupContacts from './GroupContacts';
 import GroupGrowth from './GroupGrowth';
 
 // Um número de WhatsApp pareado (ou pareando). "principal" é o primeiro; os outros são n2, n3...
-type Session = { id: string; main: boolean; status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; error?: string | null; hasSession?: boolean };
-type Group = { id: string; name: string; participants: number; session?: string };
+// O descartável (disposable) tem a sua própria tela, "Número descartável": aqui ele não aparece.
+type Session = { id: string; main: boolean; disposable?: boolean; status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; error?: string | null; hasSession?: boolean };
+type Group = { id: string; name: string; participants: number; session?: string; sessions?: string[] };
 type Channel = { id: string; type: string; destination: string; enabled: boolean };
 
 /** Painel de pareamento dos números de WhatsApp por QR code e escolha dos grupos que recebem ofertas (enviar / parar envio). */
@@ -19,7 +20,7 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
   const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
 
-  const refresh = () => api.get('/api/whatsapp/status').then(r => setSessions(r.data.sessions || [])).catch(() => {});
+  const refresh = () => api.get('/api/whatsapp/status').then(r => setSessions((r.data.sessions || []).filter((s: Session) => !s.disposable))).catch(() => {});
   const pairing = (s: Session) => s.status === 'connecting' || s.status === 'qr';
 
   // Enquanto algum número pareia, consulta o status a cada 2s para mostrar o QR e detectar a conexão.
@@ -62,7 +63,8 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
 
   async function loadGroups() {
     setMsg('');
-    try { const r = await api.get('/api/whatsapp/groups'); setGroups(r.data); }
+    // Grupo em que só o número descartável está não recebe oferta (ele não manda nada): fica na tela dele.
+    try { const r = await api.get('/api/whatsapp/groups'); setGroups((r.data as Group[]).filter(g => !(g.sessions?.length && g.sessions.every(id => id === 'descartavel')))); }
     catch (e: any) { setMsg(e?.response?.data?.error || 'Não foi possível listar os grupos.'); }
   }
 

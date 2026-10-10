@@ -19,6 +19,11 @@ import makeWASocket, {
  * O primeiro é o "principal" (pasta .wa-auth, a de sempre); os outros ficam em .wa-auth-n2, .wa-auth-n3...
  * Mensagem para grupo sai pelo número que está no grupo; resposta no privado sai pelo número que recebeu.
  *
+ * Número descartável (pedido do usuário em 2026-10-09): uma sessão fixa à parte (pasta .wa-auth-descartavel) usada
+ * SÓ para adicionar contatos nos grupos (e mandar o link de convite a quem a privacidade barrar). Ele nunca manda
+ * oferta, nunca responde cliente e não conta no limite de 4 números: se o WhatsApp bloquear esse chip, troca-se
+ * por outro sem mexer no principal.
+ *
  * Só pode existir UM socket por sessão, então este módulo roda apenas no
  * processo da API. O worker envia por meio do endpoint interno /internal/whatsapp/send.
  */
@@ -30,6 +35,8 @@ export type WaStatus = 'disconnected' | 'connecting' | 'qr' | 'connected';
 export type WaGroup = { id: string; name: string; participants: number; session: string; sessions: string[]; admins: string[] };
 
 export const MAIN_SESSION = 'principal';
+export const DISPOSABLE_SESSION = 'descartavel';
+export const isDisposable = (id: string) => id === DISPOSABLE_SESSION;
 const BASE_DIR = path.resolve(process.cwd(), '.wa-auth');
 const authDir = (id: string) => id === MAIN_SESSION ? BASE_DIR : `${BASE_DIR}-${id}`;
 const logger = pino({ level: 'silent' });
@@ -151,7 +158,7 @@ class WaSession {
 
   state() {
     const { id, status, me, connectedAt, removedAt } = this;
-    return { id, main: id === MAIN_SESSION, status, qr: this.qrDataUrl, me, error: this.lastError, connectedAt, pairedAt: this.pairedAt(), removedAt, hasSession: this.hasSavedSession() };
+    return { id, main: id === MAIN_SESSION, disposable: isDisposable(id), status, qr: this.qrDataUrl, me, error: this.lastError, connectedAt, pairedAt: this.pairedAt(), removedAt, hasSession: this.hasSavedSession() };
   }
 
   /** Tem sessão pareada salva? (o creds.json só ganha o "me" depois que o QR code é escaneado). */
@@ -238,6 +245,8 @@ class WaSession {
         const at = msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date();
         // Mensagem antiga (sincronização ao reconectar) não pode disparar resposta agora.
         if (Date.now() - at.getTime() > 5 * 60_000) continue;
+        // O descartável não atende ninguém: quem responder a ele fica sem resposta do robô.
+        if (isDisposable(this.id)) continue;
         rememberContact(jid, this.id);
         const m: WaIncoming = { jid, phone, name: msg.pushName || null, text, media, at, session: this.id };
         for (const h of incomingHandlers) Promise.resolve(h(m)).catch(e => console.error('[whatsapp] mensagem recebida:', e?.message || e));
@@ -348,7 +357,7 @@ class WaSession {
   }
 
   socket(): WASocket {
-    if (!this.sock || this.status !== 'connected') throw new Error(this.id === MAIN_SESSION ? NOT_CONNECTED : `WhatsApp do número ${this.id} não conectado. Escaneie o QR code dele em Canais.`);
+    if (!this.sock || this.status !== 'connected') throw new Error(this.id === MAIN_SESSION ? NOT_CONNECTED : isDisposable(this.id) ? 'O número descartável não está conectado. Escaneie o QR code dele na tela Número descartável.' : `WhatsApp do número ${this.id} não conectado. Escaneie o QR code dele em Canais.`);
     return this.sock;
   }
 
@@ -378,6 +387,8 @@ function session(id: string = MAIN_SESSION) {
   return s;
 }
 session(MAIN_SESSION);
+// O descartável fica sempre na lista (como o principal), pronto para parear quando a pessoa quiser.
+session(DISPOSABLE_SESSION);
 
 // Números extras já pareados antes (pastas .wa-auth-n2, .wa-auth-n3...).
 try {
@@ -387,7 +398,11 @@ try {
   }
 } catch { /* pasta ainda não existe */ }
 
-const ordered = () => [...sessions.values()].sort((a, b) => a.id === MAIN_SESSION ? -1 : b.id === MAIN_SESSION ? 1 : Number(a.id.slice(1)) - Number(b.id.slice(1)));
+// Ordem: principal, n2, n3..., e o descartável por último.
+const rank = (id: string) => id === MAIN_SESSION ? -1 : isDisposable(id) ? Infinity : Number(id.slice(1)) || 0;
+const ordered = () => [...sessions.values()].sort((a, b) => rank(a.id) - rank(b.id));
+// Números "de serviço": os que mandam ofertas e atendem clientes (o descartável fica de fora).
+const service = () => ordered().filter(s => !isDisposable(s.id));
 
 /** Estado de um número (sem id: o principal). */
 export function getWaState(id: string = MAIN_SESSION) {
@@ -405,15 +420,15 @@ export function listWaSessions() {
   return ordered().map(s => s.state());
 }
 
-/** Algum número conectado? */
+/** Algum número de serviço conectado? (o descartável não conta: ele não manda oferta nem atende) */
 export function anyWaConnected() {
-  return [...sessions.values()].some(s => s.status === 'connected');
+  return service().some(s => s.status === 'connected');
 }
 
 /** Cria a sessão de um número novo e já começa a gerar o QR code. */
 export function addWaSession(): string {
   // Reaproveita um número extra que ficou sem pareamento, em vez de acumular sessões vazias.
-  const idle = ordered().find(s => s.id !== MAIN_SESSION && s.status === 'disconnected' && !s.hasSavedSession());
+  const idle = service().find(s => s.id !== MAIN_SESSION && s.status === 'disconnected' && !s.hasSavedSession());
   let id = idle?.id;
   if (!id) { let n = 2; while (sessions.has(`n${n}`)) n++; id = `n${n}`; }
   session(id).connect().catch(() => {});
@@ -429,12 +444,12 @@ export function connectSavedSessions() {
   for (const s of sessions.values()) if (s.hasSavedSession()) s.connect().catch(e => console.error(`WhatsApp Web (${s.id}):`, e?.message || e));
 }
 
-/** Desconecta um número. O principal continua na lista (desconectado); um número extra some da lista. */
+/** Desconecta um número. O principal e o descartável continuam na lista (desconectados); um número extra some da lista. */
 export async function logoutWhatsAppWeb(id: string = MAIN_SESSION) {
   const s = sessions.get(id);
   if (!s) return;
   await s.logout();
-  if (id !== MAIN_SESSION) sessions.delete(id);
+  if (id !== MAIN_SESSION && !isDisposable(id)) sessions.delete(id);
 }
 
 // Vigia: se por algum motivo ficou desconectado com a sessão salva e sem nova tentativa marcada, reconecta.
@@ -458,9 +473,10 @@ export function hasSavedSession() {
  * Cada número trabalha sozinho (pedido do usuário em 2026-10-08): se o número do grupo/contato estiver fora do ar,
  * devolve ele mesmo assim — o envio dá "não conectado" e espera ele voltar, sem jogar o serviço em cima de outro.
  * Só quando nenhum número conhece o grupo/contato é que vai pelo principal (ou o primeiro conectado). Devolve o id da sessão.
+ * O descartável nunca é escolhido aqui: ele só trabalha quando é pedido de propósito (via) na importação de contatos.
  */
 export async function sessionForJid(jid: string): Promise<string> {
-  const all = ordered();
+  const all = service();
   const connected = all.filter(s => s.status === 'connected');
   if (jid.endsWith('@g.us')) {
     let hit = connected.find(s => s.groupIds.has(jid));

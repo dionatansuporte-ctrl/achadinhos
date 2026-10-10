@@ -525,7 +525,8 @@ app.post('/api/coupons/send/:marketplace', requireAuth, asyncRoute(async(req:any
 // Vários números (pedido do usuário em 2026-10-08): cada um tem o seu QR code; "principal" é o de sempre.
 // O QR só vai para quem pode gerenciar usuários.
 app.get('/api/whatsapp/status', requireAuth, (req:any,res:any)=>{ const admin=canManageUsers(req.user); res.json({sessions:listWaSessions().map(s=>({...s,qr:admin?s.qr:null}))}); });
-const SESSION_ID=z.string().regex(/^(principal|nd{1,3})$/);
+// Ids de sessão: principal, n2..n999 e o descartável (só adiciona contatos; pedido do usuário em 2026-10-09).
+const SESSION_ID=z.string().regex(/^(principal|n\d{1,3}|descartavel)$/);
 // Número escolhido para adicionar no grupo (pedido do usuário em 2026-10-08): precisa estar conectado e no grupo.
 function checkVia(via:string,groupId:string){
   const st=listWaSessions().find(s=>s.id===via);
@@ -534,7 +535,7 @@ function checkVia(via:string,groupId:string){
   if(!waGroupSessions(groupId).includes(via)) return `O número +${st.me?.id} não está nesse grupo. Escolha um número que seja membro (de preferência administrador).`;
   return null;
 }
-const sessionBody=(req:any)=>z.object({session:z.string().regex(/^(principal|nd{1,3})$/).default('principal')}).parse(req.body||{}).session;
+const sessionBody=(req:any)=>z.object({session:SESSION_ID.default('principal')}).parse(req.body||{}).session;
 
 app.post('/api/whatsapp/connect', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
@@ -547,8 +548,8 @@ app.post('/api/whatsapp/connect', requireAuth, asyncRoute(async(req:any,res:any)
 // Mais um número: cria a sessão e já começa a gerar o QR code dele.
 app.post('/api/whatsapp/sessions', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
-  // No máximo 4 contas (pedido do usuário em 2026-10-08): a principal e mais 3.
-  if(listWaSessions().length>=4) return res.status(409).json({error:'Já são 4 números, o máximo. Desconecte algum antes de adicionar outro.'});
+  // No máximo 4 contas (pedido do usuário em 2026-10-08): a principal e mais 3. O descartável não conta.
+  if(listWaSessions().filter(s=>!s.disposable).length>=4) return res.status(409).json({error:'Já são 4 números, o máximo. Desconecte algum antes de adicionar outro.'});
   res.status(201).json(getWaState(addWaSession()));
 }));
 
@@ -570,7 +571,9 @@ app.get('/api/whatsapp/groups/growth', requireAuth, asyncRoute(async(req:any,res
 // Contatos de um grupo (para baixar em planilha).
 app.get('/api/whatsapp/groups/:id/members', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
-  try{ res.json(await listGroupMembers(String(req.params.id))); }catch(e:any){ res.status(409).json({error:e.message}); }
+  // session: ler pelo número escolhido (a tela do descartável lista os grupos em que só ele está).
+  const via=req.query.session?SESSION_ID.parse(req.query.session):undefined;
+  try{ res.json(await listGroupMembers(String(req.params.id),via)); }catch(e:any){ res.status(409).json({error:e.message}); }
 }));
 
 // Importação de contatos de um grupo para outro. Roda em segundo plano, em lotes pequenos
@@ -691,7 +694,8 @@ app.post('/api/whatsapp/groups/copy', requireAuth, asyncRoute(async(req:any,res:
     if(body.session){ const bad=checkVia(body.session,body.to); if(bad) return res.status(409).json({error:bad}); }
     dst=await listGroupMembers(body.to,body.session);
     if(body.from){
-      const src=await listGroupMembers(body.from);
+      // Lê a origem pelo número escolhido quando ele está nela (o descartável só é usado quando pedido de propósito).
+      const src=await listGroupMembers(body.from,body.session&&waGroupSessions(body.from).includes(body.session)?body.session:undefined);
       // Contatos sem telefone (@lid, grupos com número oculto) não podem ser adicionados.
       srcName=src.name; srcPhones=src.members.filter(m=>m.phone).map(m=>m.phone!); noPhone=src.members.length-srcPhones.length;
     }else{ srcName=`arquivo ${body.fileName||'CSV'}`; srcPhones=[...new Set(body.phones!)]; }
