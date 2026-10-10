@@ -1035,14 +1035,19 @@ type InviteTarget={customerId?:string;phone?:string;label:string};
 // already: quantos foram pulados porque já tinham recebido o convite deste grupo antes.
 type CustomerInvite={groupId:string;groupName:string;text:string;link:string;pauseSec:number;dailyLimit:number;total:number;sent:number;failed:string[];skipped:number;already?:number;waitingUntil:string|null;stopped:boolean;running:boolean;error:string|null;startedAt:string;finishedAt:string|null;session?:string|null;sessionPhone?:string|null};
 type InviteEntry={job:CustomerInvite;rest:InviteTarget[]};
-let customerInvite:InviteEntry|null=null;
+// Uma fila e um limite por dia para cada número (pedido do usuário em 2026-10-09): o principal e o n2 podem mandar
+// convites ao mesmo tempo, cada um com a sua contagem. Chave = id do número que manda.
+const customerInvites=new Map<string,InviteEntry>();
 const INVITE_FILE=path.resolve(__dirname,'../.cache/customer-invite.json');
 const INVITE_COUNT_FILE=path.resolve(__dirname,'../.cache/invite-sends.json');
-function saveInvite(){ try{ writeJsonAtomic(INVITE_FILE,customerInvite); }catch(e:any){ console.warn('[convite] não salvou a fila:',e?.message||e); } }
-// Convites mandados hoje (todas as levas), em disco para o limite valer mesmo depois de reiniciar.
-function invitesToday():number{ const j=readJson<any>(INVITE_COUNT_FILE,{}); return j.day===spDay()?Number(j.count)||0:0; }
-function countInvite(){ try{ writeJsonAtomic(INVITE_COUNT_FILE,{day:spDay(),count:invitesToday()+1}); }catch(e:any){ console.warn('[convite] não salvou a contagem do dia:',e?.message||e); } }
-const invitePayload=()=>({sentToday:invitesToday(),job:customerInvite?{...customerInvite.job,left:customerInvite.rest.length}:null});
+const inviteKeyOf=(job:CustomerInvite)=>job.session||'principal';
+function saveInvite(){ try{ writeJsonAtomic(INVITE_FILE,Object.fromEntries(customerInvites)); }catch(e:any){ console.warn('[convite] não salvou a fila:',e?.message||e); } }
+// Convites mandados hoje por número, em disco para o limite valer mesmo depois de reiniciar.
+// Formato antigo ({day,count}, antes de 2026-10-09) conta como do principal.
+function inviteCounts():Record<string,number>{ const j=readJson<any>(INVITE_COUNT_FILE,{}); if(j.day!==spDay()) return {}; return j.counts&&typeof j.counts==='object'?j.counts:{principal:Number(j.count)||0}; }
+const invitesToday=(id:string)=>Number(inviteCounts()[id])||0;
+function countInvite(id:string){ try{ const counts=inviteCounts(); counts[id]=(Number(counts[id])||0)+1; writeJsonAtomic(INVITE_COUNT_FILE,{day:spDay(),counts}); }catch(e:any){ console.warn('[convite] não salvou a contagem do dia:',e?.message||e); } }
+const invitePayload=()=>({counts:inviteCounts(),jobs:Object.fromEntries([...customerInvites].map(([id,e])=>[id,{...e.job,left:e.rest.length}]))});
 // {nome} vira ", Dionatan" (ou some, se o nome não for conhecido); {grupo} e {link} são trocados direto.
 const renderInvite=(job:CustomerInvite,name:string)=>job.text.replaceAll('{link}',job.link).replaceAll('{grupo}',job.groupName).replace(/(,\s*)?\{nome\}/g,(_m,comma)=>name?(comma?`, ${name}`:name):'');
 // Chave de quem já recebeu convite (ver GroupInviteSent): telefone sem o nono dígito, ou "lid:<id>".
@@ -1057,17 +1062,17 @@ const markInvited=(groupId:string,keys:string[])=>prisma.groupInviteSent.createM
 function runInvites(entry:InviteEntry){
   const job=entry.job;
   // Número que manda os convites (escolhido na tela, pedido do usuário em 2026-10-09); sem ele, o de sempre de cada cliente.
-  const via=job.session||undefined;
+  const via=job.session||undefined, key=inviteKeyOf(job);
   const up=()=>via?getWaState(via).status==='connected':anyWaConnected();
   (async()=>{
     try{
       // Espera em fatias curtas para o "Parar" responder logo.
       const wait=async(ms:number,until=()=>false)=>{ const end=Date.now()+ms; while(!job.stopped&&!until()&&Date.now()<end) await new Promise(r=>setTimeout(r,Math.min(5_000,end-Date.now()))); };
-      while(entry.rest.length&&!job.stopped&&customerInvite===entry){
-        // Bateu o limite do dia: espera a virada do dia e continua sozinho.
-        if(invitesToday()>=job.dailyLimit){
+      while(entry.rest.length&&!job.stopped&&customerInvites.get(key)===entry){
+        // Bateu o limite do dia deste número: espera a virada do dia e continua sozinho.
+        if(invitesToday(key)>=job.dailyLimit){
           job.waitingUntil=nextSpMidnight().toISOString(); saveInvite();
-          await wait(new Date(job.waitingUntil).getTime()-Date.now(),()=>job.dailyLimit>invitesToday());
+          await wait(new Date(job.waitingUntil).getTime()-Date.now(),()=>job.dailyLimit>invitesToday(key));
           job.waitingUntil=null; continue;
         }
         // WhatsApp caiu: espera voltar e segue de onde estava.
@@ -1097,7 +1102,7 @@ function runInvites(entry:InviteEntry){
             await markInvited(job.groupId,keys).catch(()=>{});
             console.log(`[convite] ${t.label} (${jid}): convite para "${job.groupName}" enviado`);
           }
-          job.sent++; countInvite();
+          job.sent++; countInvite(key);
         }catch(e:any){
           // Caiu bem na hora de mandar: tenta o mesmo contato de novo quando voltar.
           if(notConnected(e)){ await wait(5_000); continue; }
@@ -1111,28 +1116,36 @@ function runInvites(entry:InviteEntry){
     finally{ job.running=false; job.waitingUntil=null; job.finishedAt=new Date().toISOString(); saveInvite(); }
   })();
 }
-// Ao ligar o sistema: retoma a fila de convites que estava saindo.
+// Ao ligar o sistema: retoma as filas de convites que estavam saindo (uma por número).
 (function loadInvite(){
-  let e:InviteEntry|null=null;
-  e=readJson<InviteEntry|null>(INVITE_FILE,null); if(!e) return;
-  if(!e?.job||!Array.isArray(e.rest)) return;
-  customerInvite=e; e.job.waitingUntil=null;
-  if(e.job.running){ if(e.job.stopped||!e.rest.length){ e.job.running=false; e.job.finishedAt=new Date().toISOString(); } else runInvites(e); }
+  const saved=readJson<any>(INVITE_FILE,null); if(!saved||typeof saved!=='object') return;
+  // Formato antigo (antes de 2026-10-09): uma fila só, {job,rest}.
+  const entries:InviteEntry[]=saved.job?[saved]:Object.values(saved);
+  for(const e of entries){
+    if(!e?.job||!Array.isArray(e.rest)) continue;
+    customerInvites.set(inviteKeyOf(e.job),e); e.job.waitingUntil=null;
+    if(e.job.running){ if(e.job.stopped||!e.rest.length){ e.job.running=false; e.job.finishedAt=new Date().toISOString(); } else runInvites(e); }
+  }
 })();
 app.get('/api/customers/invite', requireAuth, (_req:any,res:any)=>res.json(invitePayload()));
-// Para a fila (quem já recebeu, recebeu; o resto não sai mais).
-app.post('/api/customers/invite/stop', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; if(customerInvite?.job.running){ customerInvite.job.stopped=true; saveInvite(); } res.json(invitePayload()); });
-// Mensagem em massa pelo número principal: só administrador.
+// Para a fila de um número (quem já recebeu, recebeu; o resto não sai mais).
+app.post('/api/customers/invite/stop', requireAuth, (req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const e=customerInvites.get(sessionBody(req));
+  if(e?.job.running){ e.job.stopped=true; saveInvite(); }
+  res.json(invitePayload());
+});
+// Mensagem em massa pelo número escolhido (cada número com a sua fila): só administrador.
 app.post('/api/customers/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
   const body=z.object({groupId:z.string().endsWith('@g.us'),groupName:z.string().trim().min(1).max(200),text:z.string().trim().min(1).max(1000).refine(t=>t.includes('{link}'),'A mensagem precisa ter {link} no lugar do link do grupo.'),customerIds:z.array(z.string()).max(2000).default([]),phones:z.array(z.string().regex(/^\d{10,15}$/)).max(5000).default([]),pauseSec:z.coerce.number().int().min(10).max(3600).default(30),dailyLimit:z.coerce.number().int().min(1).max(1000).default(50),session:SESSION_ID.optional()}).parse(req.body);
   if(!body.customerIds.length&&!body.phones.length) return res.status(400).json({error:'Marque ao menos um cliente ou carregue/digite telefones.'});
-  if(customerInvite?.job.running) return res.status(409).json({error:'Ainda estou mandando os convites anteriores. Pare a fila ou espere terminar.'});
   if(!anyWaConnected()) return res.status(409).json({error:'WhatsApp não conectado. Escaneie o QR code em Canais.'});
-  // Número que manda (pedido do usuário em 2026-10-09). O descartável não manda convite: ele só adiciona contatos.
-  const sender=body.session?listWaSessions().find(s=>s.id===body.session):undefined;
-  if(body.session&&(!sender||sender.disposable)) return res.status(409).json({error:'Esse número não pode mandar convites. Escolha outro.'});
-  if(sender&&sender.status!=='connected') return res.status(409).json({error:`O número +${sender.me?.id||body.session} não está conectado agora. Escolha outro ou espere ele voltar.`});
+  // Número que manda (pedido do usuário em 2026-10-09; sem escolha, o principal). O descartável não manda convite: ele só adiciona contatos.
+  const sender=listWaSessions().find(s=>s.id===(body.session||'principal'));
+  if(!sender||sender.disposable) return res.status(409).json({error:'Esse número não pode mandar convites. Escolha outro.'});
+  if(sender.status!=='connected') return res.status(409).json({error:`O número +${sender.me?.id||sender.id} não está conectado agora. Escolha outro ou espere ele voltar.`});
+  if(customerInvites.get(sender.id)?.job.running) return res.status(409).json({error:`O número +${sender.me?.id} ainda está mandando os convites anteriores. Pare a fila dele, espere terminar ou escolha outro número.`});
   let link:string;
   try{ link=await groupInviteLink(body.groupId); }
   catch(e:any){ return res.status(409).json({error:/not-authorized|forbidden/i.test(String(e?.message||e))?`Você precisa ser administrador do grupo "${body.groupName}" para pegar o link de convite.`:e.message}); }
@@ -1149,9 +1162,9 @@ app.post('/api/customers/invite', requireAuth, asyncRoute(async(req:any,res:any)
   const rest:InviteTarget[]=[...fresh.map(c=>({customerId:c.id,label:c.givenName||c.name||(c.phone?`+${c.phone}`:c.jid)})),...freshPhones.map(p=>({phone:p,label:`+${p}`}))];
   const already=ok.length-fresh.length+phones.filter(p=>invited.has(inviteKey(p))).length;
   const now=new Date().toISOString();
-  const job:CustomerInvite={groupId:body.groupId,groupName:body.groupName,text:body.text,link,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,total:rest.length,sent:0,failed:[],skipped:customers.length-ok.length,already,waitingUntil:null,stopped:false,running:rest.length>0,error:null,startedAt:now,finishedAt:rest.length?null:now,session:sender?.id||null,sessionPhone:sender?.me?.id||null};
-  customerInvite={job,rest}; saveInvite();
-  if(rest.length) runInvites(customerInvite);
+  const job:CustomerInvite={groupId:body.groupId,groupName:body.groupName,text:body.text,link,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit,total:rest.length,sent:0,failed:[],skipped:customers.length-ok.length,already,waitingUntil:null,stopped:false,running:rest.length>0,error:null,startedAt:now,finishedAt:rest.length?null:now,session:sender.id,sessionPhone:sender.me?.id||null};
+  const entry={job,rest}; customerInvites.set(sender.id,entry); saveInvite();
+  if(rest.length) runInvites(entry);
   res.status(202).json(invitePayload());
 }));
 
