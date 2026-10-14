@@ -29,7 +29,7 @@ const LOG_MAX_BYTES = 5 * 1024 * 1024;   // log do sistema acima disso...
 const LOG_KEEP_BYTES = 1024 * 1024;      // ...fica só com o último 1 MB
 const ROUND_ACTIONS = ['RUN', 'GENERATE_JOBS'];
 
-export type CleanupResult = { logs: number; jobs: number; conversations: number; sessions: number; codes: number; files: number; memberEvents?: number; dryRun: boolean };
+export type CleanupResult = { logs: number; jobs: number; conversations: number; sessions: number; codes: number; files: number; memberEvents?: number; blocks?: number; dryRun: boolean };
 
 /** Rodadas já apagadas desta automação (linha CURSOR) + as que ainda estão no log: posição do rodízio. */
 export async function roundCount(automationId: string) {
@@ -102,6 +102,8 @@ export async function cleanupDatabase(opts: { dryRun?: boolean; now?: Date } = {
   // 5b) Entradas e saídas dos grupos mais velhas que o quadro consegue mostrar.
   const evWhere = { at: { lt: new Date(now.getTime() - MEMBER_EVENT_DAYS * DAY) } };
   out.memberEvents = dry ? await prisma.groupMemberEvent.count({ where: evWhere }) : (await prisma.groupMemberEvent.deleteMany({ where: evWhere })).count;
+  // Remoções feitas pela proteção dos grupos, com a mesma idade.
+  out.blocks = dry ? await prisma.groupBlock.count({ where: evWhere }) : (await prisma.groupBlock.deleteMany({ where: evWhere })).count;
 
   // 6) Arquivos: logs diários do PostgreSQL antigos; logs do sistema grandes ficam só com o final.
   out.files += cleanPgLogs(cutoff, dry);

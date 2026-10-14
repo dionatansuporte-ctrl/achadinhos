@@ -356,3 +356,29 @@ model GroupInviteSent {
   at      DateTime @default(now())
   @@unique([groupId, who])
 }
+
+// Proteção dos grupos (pedido do usuário em 2026-10-14): o robô remove sozinho quem entra num grupo com número
+// estrangeiro (DDI fora de allowedDdi) ou com número/prefixo da lista blocked (ex.: "62", "63" = Indonésia, Filipinas).
+// Uma linha só (id "main").
+model GroupGuard {
+  id         String   @id @default("main")
+  enabled    Boolean  @default(true)
+  sweep      Boolean  @default(false) // varre todos os grupos a cada 6 horas (pega quem entrou com o sistema desligado)
+  allowedDdi Json     // DDIs permitidos, ex.: ["55"]
+  blocked    Json     // números ou prefixos bloqueados, ex.: ["62", "63", "5544999999999"]
+  updatedAt  DateTime @updatedAt
+}
+
+// Quem a proteção removeu (ou tentou remover) de cada grupo e por quê.
+// reason: FOREIGN (DDI estrangeiro), PREFIX (prefixo bloqueado), NUMBER (número bloqueado).
+model GroupBlock {
+  id        String   @id @default(cuid())
+  groupId   String
+  groupName String?
+  member    String   // telefone (ou id anônimo quando o WhatsApp não informa)
+  reason    String
+  ok        Boolean
+  error     String?
+  at        DateTime @default(now())
+  @@index([at])
+}

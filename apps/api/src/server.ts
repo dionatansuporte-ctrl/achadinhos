@@ -33,6 +33,7 @@ import { trendingKeywords } from './integrations/mercadolivre-search';
 import { searchCategories, warmUpCategories } from './services/ml-categories';
 import { getBot, customerLink, sendOffersTo, sendTextTo, sendInviteTo, firstName, startCustomerBot, parseIntent } from './services/customer-bot';
 import { groupGrowth, startGroupGrowth, GROWTH_PERIODS, type GrowthPeriod } from './services/group-growth';
+import { guardOverview, saveGuardConfig, scanGroups, removeOne, startGroupGuard } from './services/group-guard';
 import QRCode from 'qrcode';
 import { readJson, writeJsonAtomic } from './services/json-file';
 
@@ -613,6 +614,25 @@ app.get('/api/whatsapp/groups/growth', requireAuth, asyncRoute(async(req:any,res
   const names=new Map<string,string>();
   if(anyWaConnected()) for(const g of await listGroups().catch(()=>[])) names.set(g.id,g.name);
   res.json(await groupGrowth(period,req.query.groupId?String(req.query.groupId):undefined,names));
+}));
+
+// Proteção dos grupos (pedido do usuário em 2026-10-14): remove quem entra com número estrangeiro ou bloqueado.
+app.get('/api/whatsapp/groups/guard', requireAuth, asyncRoute(async(_req:any,res:any)=>{ res.json(await guardOverview()); }));
+app.put('/api/whatsapp/groups/guard', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({enabled:z.boolean(),sweep:z.boolean().default(false),allowedDdi:z.array(z.string().max(10)).max(50),blocked:z.array(z.string().max(30)).max(2000)}).parse(req.body||{});
+  try{ res.json(await saveGuardConfig(body)); }catch(e:any){ res.status(400).json({error:e.message}); }
+}));
+// Verifica (e, com remove=true, já remove) quem deveria sair de um grupo ou de todos.
+app.post('/api/whatsapp/groups/guard/scan', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const b=z.object({groupId:z.string().max(100).optional(),remove:z.boolean().default(false)}).parse(req.body||{});
+  try{ res.json(await scanGroups(b.groupId||undefined,b.remove)); }catch(e:any){ res.status(409).json({error:e.message}); }
+}));
+app.post('/api/whatsapp/groups/guard/remove', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const b=z.object({groupId:z.string().max(100),member:z.string().max(100),reason:z.enum(['FOREIGN','PREFIX','NUMBER']).default('NUMBER')}).parse(req.body||{});
+  try{ res.json(await removeOne(b.groupId,b.member,b.reason)); }catch(e:any){ res.status(409).json({error:e.message}); }
 }));
 
 // Contatos de um grupo (para baixar em planilha).
@@ -1246,7 +1266,7 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
 const HOST=process.env.HOST||'127.0.0.1';
-app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); startGroupGrowth(); connectSavedSessions(); startScheduler(); });
+app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); startGroupGrowth(); startGroupGuard(); connectSavedSessions(); startScheduler(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).

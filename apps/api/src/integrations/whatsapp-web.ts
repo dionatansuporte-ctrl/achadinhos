@@ -692,3 +692,108 @@ export async function addGroupMembers(groupId: string, jids: string[], via?: str
   }
   return jids.map(jid => out.get(jid)!);
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Proteção dos grupos (pedido do usuário em 2026-10-14): ler os membros de um grupo e remover quem não deve ficar.
+// ---------------------------------------------------------------------------------------------------------------
+
+const bare = (j?: string | null) => String(j || '').split('@')[0].split(':')[0];
+// Como este número aparece nos grupos: pelo telefone ou pelo id anônimo (@lid), conforme o grupo.
+const mineIds = (s: WaSession) => new Set([s.me?.id, (s.sock?.user as any)?.lid].filter(Boolean).map(j => bare(String(j))));
+
+/** Este telefone (ou id) é de um dos nossos números? */
+export function isOurNumber(member: string) {
+  const key = bare(member);
+  return ordered().some(s => mineIds(s).has(key));
+}
+
+type GroupMeta = { session: WaSession; meta: Awaited<ReturnType<WASocket['groupMetadata']>>; admin: boolean; at: number };
+const metaCache = new Map<string, GroupMeta>();
+const META_TTL = 60_000;
+
+/**
+ * Metadados do grupo lidos por um número nosso que está nele, de preferência um que seja administrador
+ * (só administrador consegue remover alguém). Guardados por 1 minuto; fresh=true lê de novo.
+ */
+async function groupMetaFor(groupId: string, fresh = false): Promise<GroupMeta> {
+  const have = metaCache.get(groupId);
+  if (have && !fresh && Date.now() - have.at < META_TTL && have.session.status === 'connected') return have;
+  const connected = ordered().filter(s => s.status === 'connected');
+  if (!connected.length) throw new Error(NOT_CONNECTED);
+  const inGroup = connected.filter(s => s.groupIds.has(groupId));
+  let best: GroupMeta | null = null;
+  let lastError: any = null;
+  for (const s of (inGroup.length ? inGroup : connected)) {
+    try {
+      const meta = await s.socket().groupMetadata(groupId);
+      const mine = mineIds(s);
+      const admin = (meta.participants || []).some(p => !!p.admin && (mine.has(bare(p.id)) || mine.has(bare(p.jid)) || mine.has(bare(p.lid))));
+      best = { session: s, meta, admin, at: Date.now() };
+      if (admin) break;
+    } catch (e) { lastError = e; }
+  }
+  if (!best) throw new Error(lastError?.message ? `Não consegui ler os membros do grupo: ${lastError.message}` : 'Nenhum número nosso está neste grupo.');
+  metaCache.set(groupId, best);
+  return best;
+}
+
+/** Um membro do grupo: o id com que o WhatsApp o chama ali, o telefone (se souber), se é administrador e se é um número nosso. */
+export type WaGroupMemberInfo = { id: string; phone: string | null; name: string | null; admin: boolean; mine: boolean };
+
+function participantInfo(p: { id: string; jid?: string; lid?: string; admin?: string | null; name?: string; notify?: string }): WaGroupMemberInfo {
+  const pn = p.jid && p.jid.endsWith('@s.whatsapp.net') ? p.jid : p.id.endsWith('@s.whatsapp.net') ? p.id : '';
+  const mine = isOurNumber(p.id) || (!!p.jid && isOurNumber(p.jid)) || (!!p.lid && isOurNumber(p.lid));
+  return { id: p.id, phone: pn ? bare(pn) : null, name: p.notify || p.name || null, admin: !!p.admin, mine };
+}
+
+const findParticipant = (meta: GroupMeta['meta'], member: string) => {
+  const key = bare(member);
+  return (meta.participants || []).find(p => bare(p.id) === key || bare(p.jid) === key || bare(p.lid) === key);
+};
+
+/** Dados de um membro do grupo (null = não está nele). Se não achar na lista guardada, lê o grupo de novo. */
+export async function groupMemberInfo(groupId: string, member: string): Promise<WaGroupMemberInfo | null> {
+  let gm = await groupMetaFor(groupId);
+  let p = findParticipant(gm.meta, member);
+  if (!p && Date.now() - gm.at > 2_000) { gm = await groupMetaFor(groupId, true); p = findParticipant(gm.meta, member); }
+  return p ? participantInfo(p) : null;
+}
+
+/** Todos os membros do grupo, com o nome dele e se algum número nosso é administrador (para a varredura da proteção). */
+export async function groupMembersForGuard(groupId: string): Promise<{ name: string; admin: boolean; members: WaGroupMemberInfo[] }> {
+  const { meta, admin } = await groupMetaFor(groupId, true);
+  return { name: meta.subject || groupNames.get(groupId) || groupId, admin, members: (meta.participants || []).map(participantInfo) };
+}
+
+function removeErrorReason(code: string) {
+  if (code === '403') return 'o WhatsApp não deixou (o nosso número não é administrador, ou a pessoa é)';
+  if (code === '404') return 'a pessoa já não estava no grupo';
+  if (!code) return 'o WhatsApp não respondeu';
+  return `o WhatsApp recusou (código ${code})`;
+}
+
+export type WaRemoveResult = { member: string; ok: boolean; error?: string };
+
+/** Remove membros de um grupo. Um número nosso precisa ser administrador dele. Devolve o resultado de cada um. */
+export async function removeGroupMembers(groupId: string, members: string[]): Promise<WaRemoveResult[]> {
+  if (!members.length) return [];
+  const gm = await groupMetaFor(groupId);
+  if (!gm.admin) throw new Error('Nenhum número nosso é administrador deste grupo, então não dá para remover ninguém. Promova o número principal a administrador no WhatsApp.');
+  const sock = gm.session.socket();
+  const ids = new Map<string, string>(); // id como o grupo o chama → como veio pedido
+  for (const m of members) {
+    const p = findParticipant(gm.meta, m);
+    ids.set(p?.id || m, m);
+  }
+  const list = [...ids.keys()];
+  let res: { status: string; jid?: string }[];
+  try { res = await sock.groupParticipantsUpdate(groupId, list, 'remove'); }
+  catch (e: any) { return members.map(member => ({ member, ok: false, error: e?.message || String(e) })); }
+  finally { metaCache.delete(groupId); } // a lista de membros mudou
+  return list.map((id, i) => {
+    const r = res.find(x => x.jid === id) ?? (res.length === list.length ? res[i] : undefined);
+    const code = String(r?.status || '');
+    const ok = code === '200';
+    return { member: ids.get(id)!, ok, error: ok ? undefined : removeErrorReason(code) };
+  });
+}
