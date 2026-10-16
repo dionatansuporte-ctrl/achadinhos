@@ -5,6 +5,16 @@ title Robo das Ofertas - iniciar tudo
 cd /d "%~dp0.."
 if not exist logs mkdir logs
 
+REM Node sempre no PATH desta janela (2026-10-16: uma vez o PATH veio sem a pasta do Node, o "npx" nao foi
+REM reconhecido e a janela do sistema nem abriu). Se existir na pasta padrao, entra na frente de tudo.
+if exist "%ProgramFiles%\nodejs\node.exe" set "PATH=%ProgramFiles%\nodejs;%PATH%"
+where node >nul 2>&1
+if errorlevel 1 (
+  echo   ERRO: nao achei o Node.js. Instale em https://nodejs.org e tente de novo.
+  pause
+  exit /b 1
+)
+
 echo ==========================================================
 echo   Robo das Ofertas - subindo o projeto completo
 echo ==========================================================
