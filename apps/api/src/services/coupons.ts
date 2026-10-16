@@ -2,6 +2,7 @@ import type { Coupon, CouponSchedule, Marketplace } from '@prisma/client';
 import { prisma } from '../db';
 import { inWindow, minutesOfDay } from './scheduler';
 import { importTelegramCoupons } from './coupon-import';
+import { TELEGRAM_AUTO } from '../integrations/telegram';
 import { hasShopeeSearch, ruleMarketplaces } from './shopee-sync';
 import { MARKETPLACE_LIST, marketplaceLabel } from './marketplaces';
 
@@ -115,9 +116,11 @@ export async function marketplaceChannelIds(userId: string, marketplace: Marketp
 
 /** Grupos que recebem o listão: os marcados na agenda ou, sem marcação, os do marketplace. */
 export async function scheduleChannels(sch: Pick<CouponSchedule, 'userId' | 'marketplace' | 'channelIds'>) {
-  const picked = Array.isArray(sch.channelIds) && (sch.channelIds as string[]).length ? (sch.channelIds as string[]) : await marketplaceChannelIds(sch.userId, sch.marketplace);
-  if (!picked.length) return [];
-  return prisma.channel.findMany({ where: { userId: sch.userId, enabled: true, id: { in: picked } }, orderBy: { name: 'asc' } });
+  const explicit = Array.isArray(sch.channelIds) && (sch.channelIds as string[]).length > 0;
+  const picked = explicit ? (sch.channelIds as string[]) : await marketplaceChannelIds(sch.userId, sch.marketplace);
+  if (explicit) return prisma.channel.findMany({ where: { userId: sch.userId, enabled: true, id: { in: picked } }, orderBy: { name: 'asc' } });
+  // Modo automático: grupos das automações do marketplace + canais do Telegram marcados "automático".
+  return prisma.channel.findMany({ where: { userId: sch.userId, enabled: true, OR: [{ id: { in: picked } }, TELEGRAM_AUTO] }, orderBy: { name: 'asc' } });
 }
 
 /** Agenda do listão por marketplace; cria com os padrões na primeira vez. */

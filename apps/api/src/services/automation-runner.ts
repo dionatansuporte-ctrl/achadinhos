@@ -1,4 +1,5 @@
 import { prisma } from '../db';
+import { TELEGRAM_AUTO } from '../integrations/telegram';
 import { renderOffer, defaultOfferTemplate } from './offer';
 import { matchesRules } from './rules';
 import { productCoupons, pickCoupon } from './coupons';
@@ -50,7 +51,9 @@ async function runAutomationNow(automationId: string, opts: { source: 'manual' |
 
   const schedule = (a.scheduleJson || {}) as ScheduleJson;
   const picked = Array.isArray(schedule.channelIds) ? schedule.channelIds : [];
-  const channels = await prisma.channel.findMany({ where: { userId: a.userId, enabled: true, ...(picked.length ? { id: { in: picked } } : {}) } });
+  // Canal do Telegram marcado "automático" (configJson.allAutomations, padrão ao cadastrar pela tela Telegram) recebe
+  // as ofertas de TODAS as automações, mesmo as que escolheram só alguns grupos (pedido do usuário em 2026-10-16).
+  const channels = await prisma.channel.findMany({ where: { userId: a.userId, enabled: true, ...(picked.length ? { OR: [{ id: { in: picked } }, TELEGRAM_AUTO] } : {}) } });
   if (!channels.length) throw new Error(picked.length ? 'Os canais escolhidos nesta automação estão pausados ou foram excluídos.' : 'Cadastre ao menos um canal.');
 
   const repeatAfterDays = typeof schedule.repeatAfterDays === 'number' && schedule.repeatAfterDays >= 0 ? schedule.repeatAfterDays : DEFAULT_REPEAT_AFTER_DAYS;

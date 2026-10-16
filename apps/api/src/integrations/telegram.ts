@@ -139,3 +139,6 @@ export async function sendTelegramOffer(chatId: string, text: string, imageUrl?:
   const msg = await call<any>('sendMessage', { chat_id: chatId, text: html.slice(0, TEXT_MAX), parse_mode: 'HTML' });
   return { messageId: msg.message_id, chatId: msg.chat?.id, photo: false };
 }
+
+/** Filtro Prisma: canal do Telegram marcado "automático" (recebe as ofertas de todas as automações e o listão de cupons). */
+export const TELEGRAM_AUTO = { type: 'TELEGRAM' as const, enabled: true, configJson: { path: ['allAutomations'], equals: true } };

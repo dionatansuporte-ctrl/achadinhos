@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, ExternalLink, Plus, Power, RefreshCw, Search, Send, SendHorizontal, Trash2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { CheckCircle2, ExternalLink, Plus, Power, RefreshCw, Search, Send, SendHorizontal, Trash2, Zap } from 'lucide-react';
 import { api } from './api';
 import { notify } from './notify';
 import { brl } from './money';
@@ -11,7 +12,7 @@ import { brl } from './money';
  * de cupons também podem usar. Aqui dá para cadastrar os canais, testar e disparar produtos na hora.
  */
 
-type Channel = { id: string; name: string; destination: string; enabled: boolean };
+type Channel = { id: string; name: string; destination: string; enabled: boolean; allAutomations: boolean };
 type Recent = { id: string; status: string; error: string | null; createdAt: string; sentAt: string | null; title: string; imageUrl: string | null; price: number | null; channel: { id: string; name: string }; link: string | null };
 type Product = { id: string; title: string; imageUrl?: string | null; price?: string | number | null; oldPrice?: string | number | null; discountPercent?: number | null; marketplace: string; active: boolean; createdAt: string };
 
@@ -114,6 +115,10 @@ export default function TelegramPage() {
     try { await api.delete(`/api/channels/${c.id}`); notify('Canal excluído.'); load(); }
     catch (e: any) { notify(e?.response?.data?.error || 'Não consegui excluir.', 'error'); }
   }
+  async function setAuto(c: Channel, on: boolean) {
+    try { await api.patch(`/api/telegram/channels/${c.id}`, { allAutomations: on }); notify(on ? `"${c.name}" passa a receber as ofertas de todas as automações.` : `"${c.name}" só recebe das automações que o marcarem no passo Canais.`); load(); }
+    catch (e: any) { notify(e?.response?.data?.error || 'Não consegui alterar.', 'error'); }
+  }
   async function testChannel(c: Channel) {
     setBusy('ch' + c.id);
     try { const r = await api.post(`/api/telegram/channels/${c.id}/test`); notify(`Mensagem de teste chegou em "${c.name}".`); if (r.data.link) window.open(r.data.link, '_blank', 'noopener'); }
@@ -155,7 +160,7 @@ export default function TelegramPage() {
 
   return <section className="page">
     <h1>Telegram</h1>
-    <p>Mande as promoções para os seus canais e grupos do Telegram. Um bot seu publica lá; os canais cadastrados aqui também aparecem nas automações, em Capturar ofertas e no listão de cupons.</p>
+    <p>Mande as promoções para os seus canais e grupos do Telegram, igual aos grupos do WhatsApp. Um bot seu publica lá. Canal cadastrado aqui já nasce no modo automático: recebe as ofertas de todas as automações (com a categoria, o horário e o intervalo de cada uma) e o listão de cupons. Para uma categoria e um horário só do Telegram, use o atalho "Criar automação" do canal.</p>
     {msg && <p className="inline-msg">{msg}</p>}
 
     <div className="card">
@@ -189,6 +194,10 @@ export default function TelegramPage() {
       {channels.length ? <div className="list-grid" style={{ marginTop: 16 }}>{channels.map(c => <div className="card tg-channel" key={c.id}>
         <div className="card-head"><div><SendHorizontal size={20} /><h3>{c.name}</h3></div><span className={`badge ${c.enabled ? 'badge-on' : 'badge-off'}`}>{c.enabled ? 'Ativo' : 'Pausado'}</span></div>
         <p className="muted">{chatLink(c.destination) ? <a href={chatLink(c.destination)!} target="_blank" rel="noreferrer">{c.destination}</a> : `ID ${c.destination}`}</p>
+        <label className="check-line" style={{ marginTop: 4, fontSize: 14 }} title="Ligado: recebe as ofertas de todas as automações e o listão de cupons, sem precisar marcar este canal em cada uma. Desligado: só das automações que o escolherem no passo Canais.">
+          <input type="checkbox" checked={c.allAutomations} onChange={e => setAuto(c, e.target.checked)} /><span>Automático: ofertas de todas as automações</span>
+        </label>
+        <Link className="link-btn" style={{ marginTop: 6, padding: 0, textAlign: 'left' }} to={`/automations/new?channel=${c.id}&name=${encodeURIComponent('Telegram ' + c.name)}`} title="Abre Nova automação já com este canal marcado: escolha a categoria, os termos, o horário e o intervalo"><Zap size={14} style={{ verticalAlign: -2 }} /> Criar automação com categoria e horário só para este canal</Link>
         <div className="card-actions">
           <button className="outline" onClick={() => toggle(c)}><Power size={16} /> {c.enabled ? 'Pausar' : 'Ativar'}</button>
           <button className="outline" disabled={busy === 'ch' + c.id} onClick={() => testChannel(c)}><Send size={16} /> {busy === 'ch' + c.id ? 'Enviando...' : 'Testar'}</button>

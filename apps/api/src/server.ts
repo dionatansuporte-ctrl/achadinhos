@@ -984,7 +984,8 @@ function telegramPostLink(destination:string,tg:any){
   return m?`https://t.me/c/${m[1]}/${id}`:null;
 }
 app.get('/api/telegram', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const channels=await prisma.channel.findMany({where:{userId:req.user.id,type:'TELEGRAM'},orderBy:{createdAt:'asc'},select:{id:true,name:true,destination:true,enabled:true,createdAt:true}});
+  const rows=await prisma.channel.findMany({where:{userId:req.user.id,type:'TELEGRAM'},orderBy:{createdAt:'asc'},select:{id:true,name:true,destination:true,enabled:true,createdAt:true,configJson:true}});
+  const channels=rows.map(({configJson,...c})=>({...c,allAutomations:!!(configJson as any)?.allAutomations}));
   const jobs=channels.length?await prisma.promotionJob.findMany({where:{channelId:{in:channels.map(c=>c.id)}},orderBy:{createdAt:'desc'},take:60,
     select:{id:true,status:true,errorMessage:true,createdAt:true,sentAt:true,payloadJson:true,product:{select:{title:true,imageUrl:true,price:true}},channel:{select:{id:true,name:true,destination:true}}}}):[];
   res.json({
@@ -1014,8 +1015,15 @@ app.post('/api/telegram/channels', requireAuth, asyncRoute(async(req:any,res:any
   const dest=info.username?`@${info.username}`:String(info.id);
   const dup=await prisma.channel.findFirst({where:{userId:req.user.id,type:'TELEGRAM',destination:{in:[dest,destination,String(info.id)]}}});
   if(dup) return res.status(409).json({error:`Esse canal já está cadastrado como "${dup.name}".`});
-  const channel=await prisma.channel.create({data:{userId:req.user.id,type:'TELEGRAM',name:body.name||info.title,destination:dest,configJson:{chatId:info.id,chatType:info.type,username:info.username||null}}});
+  const channel=await prisma.channel.create({data:{userId:req.user.id,type:'TELEGRAM',name:body.name||info.title,destination:dest,configJson:{chatId:info.id,chatType:info.type,username:info.username||null,allAutomations:true}}});
   res.status(201).json({channel,info,warning:info.canPost?null:'O bot ainda não é administrador desse canal: coloque-o como administrador com permissão de publicar, senão os envios falham.'});
+}));
+// "Automático": o canal recebe as ofertas de todas as automações (e o listão de cupons) sem precisar ser marcado em cada uma.
+app.patch('/api/telegram/channels/:id', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({allAutomations:z.boolean()}).parse(req.body);
+  const c=await prisma.channel.findFirst({where:{id:req.params.id,userId:req.user.id,type:'TELEGRAM'}}); if(!c) return res.status(404).json({error:'Canal não encontrado.'});
+  await prisma.channel.update({where:{id:c.id},data:{configJson:{...((c.configJson as any)||{}),allAutomations:body.allAutomations}}});
+  res.json({ok:true,allAutomations:body.allAutomations});
 }));
 // Mensagem de teste direta (sem passar pela fila) para ver se chega no canal.
 app.post('/api/telegram/channels/:id/test', requireAuth, asyncRoute(async(req:any,res:any)=>{
