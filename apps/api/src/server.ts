@@ -37,6 +37,8 @@ import { guardOverview, saveGuardConfig, scanGroups, removeOne, startGroupGuard 
 import QRCode from 'qrcode';
 import { readJson, writeJsonAtomic } from './services/json-file';
 import { normalizeTelegramChat, sendTelegramOffer, telegramBotInfo, telegramChatInfo, telegramDiscoverChats } from './integrations/telegram';
+import { getContactsConfig, inviteContactsToGroup, inviteProgress, listContacts, saveContactsConfig, startTelegramContacts } from './services/telegram-contacts';
+import * as tgAccount from './services/telegram-account';
 
 // Sem JWT_SECRET a API não pode assinar logins nem conversar com o worker: avisa e não sobe.
 if(!process.env.JWT_SECRET){ console.error('JWT_SECRET não definido em apps/api/.env. Defina uma chave longa e aleatória e reinicie.'); process.exit(1); }
@@ -985,11 +987,18 @@ function telegramPostLink(destination:string,tg:any){
 }
 app.get('/api/telegram', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const rows=await prisma.channel.findMany({where:{userId:req.user.id,type:'TELEGRAM'},orderBy:{createdAt:'asc'},select:{id:true,name:true,destination:true,enabled:true,createdAt:true,configJson:true}});
-  const channels=rows.map(({configJson,...c})=>({...c,allAutomations:!!(configJson as any)?.allAutomations}));
+  // chatType "private" = contato (pessoa que abriu o bot); o resto é canal ou grupo.
+  const channels=rows.map(({configJson,...c})=>({...c,allAutomations:!!(configJson as any)?.allAutomations,chatType:(configJson as any)?.chatType||null,username:(configJson as any)?.username||null}));
   const jobs=channels.length?await prisma.promotionJob.findMany({where:{channelId:{in:channels.map(c=>c.id)}},orderBy:{createdAt:'desc'},take:60,
     select:{id:true,status:true,errorMessage:true,createdAt:true,sentAt:true,payloadJson:true,product:{select:{title:true,imageUrl:true,price:true}},channel:{select:{id:true,name:true,destination:true}}}}):[];
+  const configured=!!(await getSecret('TELEGRAM_BOT_TOKEN'));
+  // Dados do bot (em cache 10 min) para a tela montar o link t.me/<bot> que o usuário manda aos contatos.
+  let bot=null; if(configured){ try{ bot=await telegramBotInfo(); }catch{ /* token inválido ou Telegram fora: a tela avisa no "Testar bot" */ } }
   res.json({
-    configured:!!(await getSecret('TELEGRAM_BOT_TOKEN')),
+    configured,
+    bot,
+    // Contatos = quem tocou em Iniciar no bot; só recebem o convite do grupo de ofertas, nunca oferta no privado.
+    contacts:(()=>{const c=getContactsConfig();return {...c,list:configured?listContacts(c.inviteGroupId):[],progress:inviteProgress()};})(),
     channels,
     recent:jobs.map(j=>{const p:any=j.payloadJson||{};return {id:j.id,status:j.status,error:j.errorMessage,createdAt:j.createdAt,sentAt:j.sentAt,title:j.product?.title||p.title||'(sem título)',imageUrl:j.product?.imageUrl||p.imageUrl||null,price:j.product?.price!=null?Number(j.product.price):null,channel:j.channel,link:telegramPostLink(j.channel.destination,p.telegram)}})
   });
@@ -1006,11 +1015,78 @@ app.post('/api/telegram/test', requireAuth, asyncRoute(async(req:any,res:any)=>{
 app.post('/api/telegram/discover', requireAuth, asyncRoute(async(_req:any,res:any)=>{
   try{ res.json({chats:await telegramDiscoverChats()}); }catch(e:any){ res.status(400).json({error:e.message}); }
 }));
+// Contatos (pedido do usuário em 2026-10-16): grupo de ofertas cujo convite vai para quem entra no bot, e se vai sozinho.
+app.patch('/api/telegram/contacts/settings', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({autoInvite:z.boolean().optional(),inviteGroupId:z.string().nullable().optional()}).parse(req.body||{});
+  if(body.inviteGroupId){ const g=await prisma.channel.findFirst({where:{id:body.inviteGroupId,userId:req.user.id,type:'TELEGRAM'}}); if(!g||(g.configJson as any)?.chatType==='private') return res.status(400).json({error:'Escolha um grupo ou canal do Telegram cadastrado.'}); }
+  res.json(saveContactsConfig(body));
+}));
+// Convite do grupo de ofertas para os contatos, em lote (o bot não consegue colocar ninguém no grupo; manda o link para cada um).
+app.post('/api/telegram/contacts/invite', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({groupId:z.string().min(1),contactIds:z.array(z.union([z.string(),z.number()])).optional(),again:z.boolean().optional()}).parse(req.body||{});
+  try{ res.json(await inviteContactsToGroup(req.user.id,body.groupId,body.contactIds?.map(String),!!body.again)); }
+  catch(e:any){ res.status(400).json({error:e.message}); }
+}));
+// ---------- Conta do Telegram do usuário (pedido em 2026-10-16): login por telefone/código, grupos de que participa ----------
+const tgErr=(res:any,e:any)=>res.status(400).json({error:e?.message||String(e)});
+app.get('/api/telegram/account', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  res.json({account:await tgAccount.getAccountState(),copy:tgAccount.copyPayload()});
+}));
+app.post('/api/telegram/account/login', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({phone:z.string().trim().min(8).max(20)}).parse(req.body);
+  try{ res.json({...(await tgAccount.startLogin(body.phone)),account:await tgAccount.getAccountState()}); }catch(e:any){ tgErr(res,e); }
+}));
+app.post('/api/telegram/account/code', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({code:z.string().trim().max(10).optional().default(''),password:z.string().max(200).optional()}).parse(req.body||{});
+  try{ res.json({...(await tgAccount.finishLogin(body.code,body.password||undefined)),account:await tgAccount.getAccountState()}); }catch(e:any){ tgErr(res,e); }
+}));
+app.post('/api/telegram/account/logout', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  try{ await tgAccount.logoutAccount(); res.json({account:await tgAccount.getAccountState()}); }catch(e:any){ tgErr(res,e); }
+}));
+app.get('/api/telegram/account/groups', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  try{ res.json({groups:await tgAccount.listAccountGroups()}); }catch(e:any){ tgErr(res,e); }
+}));
+
+// Importação para um grupo do Telegram pela conta do usuário. Origem: telefones, outro grupo do Telegram, grupo do WhatsApp ou clientes.
+// Ritmo e limite diário são travados no serviço (mín. 20 s entre pessoas, máx. 100 por dia) para não derrubar a conta.
+app.post('/api/telegram/account/copy', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({
+    to:z.string().min(1),
+    source:z.discriminatedUnion('type',[
+      z.object({type:z.literal('phones'),phones:z.array(z.string()).min(1).max(5000),label:z.string().max(120).optional()}),
+      z.object({type:z.literal('telegram'),groupId:z.string().min(1)}),
+      z.object({type:z.literal('whatsapp'),groupId:z.string().endsWith('@g.us')}),
+      z.object({type:z.literal('customers')})
+    ]),
+    pauseSec:z.coerce.number().optional(),dailyLimit:z.coerce.number().optional()
+  }).parse(req.body);
+  try{
+    let candidates:tgAccount.Candidate[]=[]; let fromLabel='';
+    if(body.source.type==='phones'){ candidates=body.source.phones.map(p=>tgAccount.phoneCandidate(p)).filter((x):x is tgAccount.Candidate=>!!x); fromLabel=body.source.label||`${candidates.length} telefone(s) colados`; }
+    else if(body.source.type==='telegram'){ if(body.source.groupId===body.to) return res.status(400).json({error:'Escolha grupos diferentes.'}); const g=await tgAccount.groupMembers(body.source.groupId); candidates=g.members; fromLabel=`Telegram: ${g.title}`; }
+    else if(body.source.type==='whatsapp'){ const g=await tgAccount.whatsappGroupCandidates(body.source.groupId); candidates=g.members; fromLabel=`WhatsApp: ${g.title}`; }
+    else { candidates=await tgAccount.customerCandidates(req.user.id); fromLabel='Clientes do WhatsApp'; }
+    res.status(202).json(await tgAccount.startCopy({toId:body.to,fromLabel,sourceType:body.source.type,candidates,pauseSec:body.pauseSec,dailyLimit:body.dailyLimit}));
+  }catch(e:any){ tgErr(res,e); }
+}));
+app.post('/api/telegram/account/copy/stop', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; try{ res.json(tgAccount.stopCopy(String(req.body?.to||''))); }catch(e:any){ tgErr(res,e); } });
+app.post('/api/telegram/account/copy/settings', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; const b=z.object({to:z.string(),pauseSec:z.coerce.number().optional(),dailyLimit:z.coerce.number().optional()}).parse(req.body); try{ res.json(tgAccount.updateCopy(b.to,b)); }catch(e:any){ tgErr(res,e); } });
+app.post('/api/telegram/account/copy/resume', requireAuth, asyncRoute(async(req:any,res:any)=>{ if(!requireAdmin(req,res))return; const b=z.object({to:z.string(),pauseSec:z.coerce.number().optional(),dailyLimit:z.coerce.number().optional()}).parse(req.body); try{ res.status(202).json(await tgAccount.resumeCopy(b.to,b)); }catch(e:any){ tgErr(res,e); } }));
+app.delete('/api/telegram/account/copy/:to', requireAuth, (req:any,res:any)=>{ if(!requireAdmin(req,res))return; try{ res.json(tgAccount.removeCopy(String(req.params.to))); }catch(e:any){ tgErr(res,e); } });
+
 // Cadastra um canal/grupo do Telegram depois de conferir que o bot consegue falar nele.
 app.post('/api/telegram/channels', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const body=z.object({destination:z.string().trim().min(2),name:z.string().trim().max(80).optional()}).parse(req.body);
   let destination:string; try{ destination=normalizeTelegramChat(body.destination); }catch(e:any){ return res.status(400).json({error:e.message}); }
   let info; try{ info=await telegramChatInfo(destination); }catch(e:any){ return res.status(400).json({error:e.message}); }
+  // Pessoa (chat privado) não vira destino: oferta só sai em grupo e canal (decisão do usuário em 2026-10-16); contato só recebe o convite do grupo.
+  if(info.type==='private') return res.status(400).json({error:`"${info.title}" é um contato, não um grupo. As ofertas só saem em grupos e canais; use o quadro Contatos para mandar o convite do grupo.`});
   // Depois do getChat o ID numérico é definitivo (o @nome pode mudar); guarda o @nome quando existir, que dá link público.
   const dest=info.username?`@${info.username}`:String(info.id);
   const dup=await prisma.channel.findFirst({where:{userId:req.user.id,type:'TELEGRAM',destination:{in:[dest,destination,String(info.id)]}}});
@@ -1338,7 +1414,7 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
 const HOST=process.env.HOST||'127.0.0.1';
-app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); startGroupGrowth(); startGroupGuard(); connectSavedSessions(); startScheduler(); });
+app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); startGroupGrowth(); startGroupGuard(); startTelegramContacts(); tgAccount.connectSavedAccount().catch(()=>{}); connectSavedSessions(); startScheduler(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).

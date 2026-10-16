@@ -16,7 +16,7 @@ Projeto full-stack para automatizar achadinhos/ofertas de afiliados, inspirado n
 - Worker com retry e histórico de execução.
 - WhatsApp Cloud API oficial para envio por contato.
 - Instagram Graph API preparada para publicação de imagem.
-- Telegram: tela própria no menu; um bot do @BotFather publica as ofertas em canais e grupos (tipo de canal `TELEGRAM`, token em `TELEGRAM_BOT_TOKEN`), com foto, negrito e link rastreado, usável também pelas automações, Capturar ofertas e listão de cupons.
+- Telegram: tela própria no menu; um bot do @BotFather publica as ofertas em canais e grupos (tipo de canal `TELEGRAM`, token em `TELEGRAM_BOT_TOKEN`), com foto, negrito e link rastreado, usável também pelas automações, Capturar ofertas e listão de cupons. Contatos: quem abre o bot e toca em Iniciar aparece na tela e recebe o convite do grupo de ofertas, sozinho (leitura do bot a cada minuto) e em lote; oferta nenhuma vai no privado. Estado em `.cache/telegram-chats.json`, `telegram-contacts.json` e `telegram-invites.json`. Tela "Telegram: contatos nos grupos" (`/telegram/contatos`, só admin): login com a conta do usuário via GramJS (api_id/api_hash em TELEGRAM_API_ID/HASH, sessão em TELEGRAM_USER_SESSION) e importação de pessoas para um grupo do Telegram a partir de telefones, outro grupo do Telegram, grupo do WhatsApp ou clientes; uma por vez, mín. 20 s, máx. 100/dia, respeita FLOOD_WAIT e para no PEER_FLOOD; progresso em `.cache/telegram-copies.json`, `telegram-adds.json`, `telegram-added.json`.
 - Cadastro de canais, automações, listas e logs.
 - Interface responsiva em português, com tema escuro/laranja semelhante ao mockup.
 - Shopee Affiliate Open API preparada por configuração, sem scraping.

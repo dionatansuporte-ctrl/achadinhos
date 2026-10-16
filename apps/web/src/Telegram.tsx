@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckCircle2, ExternalLink, Plus, Power, RefreshCw, Search, Send, SendHorizontal, Trash2, Zap } from 'lucide-react';
+import { CheckCircle2, Copy, ExternalLink, Plus, Power, RefreshCw, Search, Send, SendHorizontal, Trash2, UserPlus, Users, Zap } from 'lucide-react';
 import { api } from './api';
 import { notify } from './notify';
 import { brl } from './money';
@@ -10,9 +10,16 @@ import { brl } from './money';
  * Funciona com um bot criado no @BotFather: o token fica salvo criptografado (TELEGRAM_BOT_TOKEN) e cada canal
  * onde o bot é administrador vira um canal do tipo TELEGRAM, que as automações, o Capturar ofertas e o listão
  * de cupons também podem usar. Aqui dá para cadastrar os canais, testar e disparar produtos na hora.
+ *
+ * Contatos (também 2026-10-16): quem abre o bot e toca em Iniciar aparece aqui e recebe o convite do grupo de ofertas,
+ * sozinho e em lote. Oferta nenhuma vai no privado (decisão do usuário): o bot só serve para trazer gente ao grupo.
  */
 
 type Channel = { id: string; name: string; destination: string; enabled: boolean; allAutomations: boolean };
+type Contact = { id: number; title: string; username?: string; seenAt: string; invitedAt: string | null };
+type Progress = { running: boolean; groupName: string; total: number; sent: number; failed: number; finishedAt: string | null; errors: string[] };
+type Contacts = { autoInvite: boolean; inviteGroupId: string | null; list: Contact[]; progress: Progress };
+const NO_PROGRESS: Progress = { running: false, groupName: '', total: 0, sent: 0, failed: 0, finishedAt: null, errors: [] };
 type Recent = { id: string; status: string; error: string | null; createdAt: string; sentAt: string | null; title: string; imageUrl: string | null; price: number | null; channel: { id: string; name: string }; link: string | null };
 type Product = { id: string; title: string; imageUrl?: string | null; price?: string | number | null; oldPrice?: string | number | null; discountPercent?: number | null; marketplace: string; active: boolean; createdAt: string };
 
@@ -42,11 +49,48 @@ export default function TelegramPage() {
   const [freeImage, setFreeImage] = useState('');
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
+  const [contacts, setContacts] = useState<Contacts>({ autoInvite: true, inviteGroupId: null, list: [], progress: NO_PROGRESS });
 
   const load = () => api.get('/api/telegram').then(r => {
     setConfigured(r.data.configured); setChannels(r.data.channels); setRecent(r.data.recent);
+    if (r.data.bot) setBot(r.data.bot);
+    if (r.data.contacts) setContacts(r.data.contacts);
     setTargets(t => t.length ? t.filter(id => r.data.channels.some((c: Channel) => c.id === id && c.enabled)) : r.data.channels.filter((c: Channel) => c.enabled).map((c: Channel) => c.id));
   }).catch(e => setMsg(e?.response?.data?.error || 'Desculpe, não consegui carregar a tela do Telegram. Tente de novo.'));
+
+  // Lote de convites em andamento: acompanha o progresso.
+  useEffect(() => {
+    if (!contacts.progress.running) return;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [contacts.progress.running]);
+
+  async function setContactsCfg(patch: Partial<Pick<Contacts, 'autoInvite' | 'inviteGroupId'>>) {
+    try {
+      const r = await api.patch('/api/telegram/contacts/settings', patch);
+      setContacts(c => ({ ...c, ...r.data }));
+      if ('autoInvite' in patch) notify(patch.autoInvite ? 'Quem entrar no bot recebe o convite do grupo sozinho, em até 1 minuto.' : 'Convite automático desligado. Use "Convidar todos" quando quiser.');
+      if ('inviteGroupId' in patch) load();
+    } catch (e: any) { notify(e?.response?.data?.error || 'Não consegui salvar.', 'error'); }
+  }
+  /** Em lote: convite do grupo de ofertas para todos os contatos que ainda não receberam (ou só para `ids`). */
+  async function inviteAll(ids?: number[], again = false) {
+    if (!contacts.inviteGroupId) return notify('Escolha primeiro o grupo de ofertas para onde os contatos vão.', 'error');
+    setBusy('invite');
+    try {
+      const r = await api.post('/api/telegram/contacts/invite', { groupId: contacts.inviteGroupId, contactIds: ids, again });
+      if (r.data.queued) notify(`Mandando o convite de "${r.data.groupName}" para ${r.data.queued} contato(s), um por vez. Acompanhe abaixo.`);
+      else notify(r.data.total ? `Todos os ${r.data.total} contato(s) já receberam o convite de "${r.data.groupName}".` : 'Ninguém falou com o bot ainda. Mande o link do bot para as pessoas e peça para tocarem em Iniciar.', 'info');
+      load();
+    } catch (e: any) { notify(e?.response?.data?.error || 'Desculpe, não consegui mandar os convites. Tente de novo.', 'error'); }
+    finally { setBusy(''); }
+  }
+  const botLink = bot ? `https://t.me/${bot.username}` : '';
+  async function copyLink() {
+    try { await navigator.clipboard.writeText(botLink); notify('Link do bot copiado. Mande para os seus contatos!'); }
+    catch { notify(botLink, 'info'); }
+  }
+  const shareText = `Oi! Quer receber as melhores ofertas no Telegram? Abra ${botLink} e toque em Iniciar que eu te mando o convite do grupo. 🛍️`;
 
   useEffect(() => {
     load();
@@ -189,7 +233,7 @@ export default function TelegramPage() {
         <button className="outline" disabled={busy === 'discover' || !configured} onClick={discover} title="Lista os canais e grupos em que o bot foi adicionado recentemente"><Search size={16} /> {busy === 'discover' ? 'Procurando...' : 'Descobrir canais do bot'}</button>
       </div>
       <p className="hint">Canal privado não tem @nome: use "Descobrir canais do bot" logo depois de adicionar o bot nele (ou mande uma mensagem no canal) para pegar o ID.</p>
-      {discovered && discovered.length > 0 && <div className="tg-discover">{discovered.map(c => <div className="user-row" key={c.id}><div className="user-main"><b>{c.title}</b><small>{c.type === 'channel' ? 'Canal' : 'Grupo'} · {c.username ? `@${c.username}` : `ID ${c.id}`}</small></div>
+      {discovered && discovered.filter(c => c.type !== 'private').length > 0 && <div className="tg-discover">{discovered.filter(c => c.type !== 'private').map(c => <div className="user-row" key={c.id}><div className="user-main"><b>{c.title}</b><small>{c.type === 'channel' ? 'Canal' : 'Grupo'} · {c.username ? `@${c.username}` : `ID ${c.id}`}</small></div>
         {channels.some(x => x.destination === (c.username ? `@${c.username}` : String(c.id))) ? <span className="badge badge-on">Já cadastrado</span> : <button className="outline" disabled={busy === 'add'} onClick={() => addChannel(c.username ? `@${c.username}` : String(c.id), c.title)}><Plus size={16} /> Cadastrar</button>}</div>)}</div>}
       {channels.length ? <div className="list-grid" style={{ marginTop: 16 }}>{channels.map(c => <div className="card tg-channel" key={c.id}>
         <div className="card-head"><div><SendHorizontal size={20} /><h3>{c.name}</h3></div><span className={`badge ${c.enabled ? 'badge-on' : 'badge-off'}`}>{c.enabled ? 'Ativo' : 'Pausado'}</span></div>
@@ -204,6 +248,35 @@ export default function TelegramPage() {
           <button className="icon-btn" title="Excluir canal" onClick={() => remove(c)}><Trash2 size={18} /></button>
         </div>
       </div>)}</div> : <p className="hint">Nenhum canal do Telegram cadastrado ainda.</p>}
+    </div>
+
+    <div className="card">
+      <div className="card-head"><div><Users size={22} /><h3>Contatos → grupo de ofertas</h3></div><span className="badge badge-off">{contacts.list.length} contato(s) · {contacts.list.filter(c => c.invitedAt).length} convidado(s)</span></div>
+      <p className="hint" style={{ marginTop: 0 }}>Para colocar gente no grupo de ofertas em lote. O Telegram não deixa um bot inserir ninguém num grupo, e o bot só fala com quem abriu a conversa com ele: mande o link do bot abaixo para os seus contatos (ou cole nos seus grupos do WhatsApp). Quem tocar em <b>Iniciar</b> aparece aqui e recebe o convite do grupo, sozinho e em lote. Oferta nenhuma vai no privado: as promoções saem só no grupo.</p>
+      {configured && (bot ? <div className="form-row form-row-tight">
+        <input readOnly value={botLink} onFocus={e => e.target.select()} title="Link do seu bot: quem abrir e tocar em Iniciar vira contato" />
+        <button className="outline" onClick={copyLink}><Copy size={16} /> Copiar link do bot</button>
+        <a className="outline tg-link" href={`https://wa.me/?text=${encodeURIComponent(shareText)}`} target="_blank" rel="noreferrer" title="Abre o WhatsApp com o convite pronto para você escolher o contato ou grupo"><SendHorizontal size={16} /> Mandar pelo WhatsApp</a>
+      </div> : <p className="hint">Clique em "Testar bot" acima para carregar o link do bot.</p>)}
+      <div className="form-row form-row-tight" style={{ marginTop: 10 }}>
+        <select value={contacts.inviteGroupId || ''} onChange={e => setContactsCfg({ inviteGroupId: e.target.value || null })} title="Grupo ou canal do Telegram cujo convite os contatos recebem" style={{ maxWidth: 320 }}>
+          <option value="">Escolha o grupo de ofertas...</option>
+          {channels.map(c => <option key={c.id} value={c.id}>{c.name} ({c.destination})</option>)}
+        </select>
+        <label className="check-line" style={{ marginTop: 0, fontSize: 14, flex: 'none' }} title="A cada minuto o robô lê quem tocou em Iniciar no bot e manda o convite do grupo na hora, sem você precisar clicar."><input type="checkbox" checked={contacts.autoInvite} onChange={e => setContactsCfg({ autoInvite: e.target.checked })} /><span>Convidar sozinho quem entrar no bot</span></label>
+        <button className="primary" disabled={busy === 'invite' || !configured || !contacts.inviteGroupId || contacts.progress.running} onClick={() => inviteAll()} title="Manda agora o convite do grupo para todos os contatos que ainda não receberam"><UserPlus size={16} /> {busy === 'invite' ? 'Preparando...' : `Convidar todos para o grupo (${contacts.list.filter(c => !c.invitedAt).length})`}</button>
+      </div>
+      {!channels.length && <p className="hint">Cadastre primeiro o grupo (ou canal) de ofertas no quadro acima; o bot precisa ser administrador dele com permissão de convidar por link.</p>}
+      {(contacts.progress.running || contacts.progress.total > 0) && <p className={contacts.progress.running ? 'hint' : 'hint'} style={{ marginTop: 8 }}>
+        {contacts.progress.running ? <><RefreshCw size={14} style={{ verticalAlign: -2 }} /> Mandando convites de "{contacts.progress.groupName}": {contacts.progress.sent + contacts.progress.failed} de {contacts.progress.total}{contacts.progress.failed ? ` (${contacts.progress.failed} falha(s))` : ''}...</>
+          : <>Último lote para "{contacts.progress.groupName}": {contacts.progress.sent} convite(s) enviado(s){contacts.progress.failed ? `, ${contacts.progress.failed} falha(s)` : ''}{contacts.progress.finishedAt ? ` · ${when(contacts.progress.finishedAt)}` : ''}.</>}
+        {contacts.progress.errors.length > 0 && <small className="log-err" style={{ display: 'block' }}>{contacts.progress.errors.slice(0, 3).join(' · ')}</small>}
+      </p>}
+      {contacts.list.length ? <div className="tg-discover">{contacts.list.map(c => <div className="user-row" key={c.id}>
+        <div className="user-main"><b>{c.title}</b><small>{c.username ? <a href={`https://t.me/${c.username}`} target="_blank" rel="noreferrer">@{c.username}</a> : `ID ${c.id}`} · entrou no bot {when(c.seenAt)}</small></div>
+        {c.invitedAt ? <span className="badge badge-on" title="Já recebeu o convite do grupo escolhido"><CheckCircle2 size={14} /> Convidado {when(c.invitedAt)}</span> : <span className="badge badge-ready">Aguardando convite</span>}
+        <button className="outline" disabled={busy === 'invite' || !contacts.inviteGroupId || contacts.progress.running} onClick={() => inviteAll([c.id], true)} title={c.invitedAt ? 'Manda o convite de novo' : 'Manda o convite do grupo só para este contato'}><UserPlus size={15} /> {c.invitedAt ? 'Reenviar' : 'Convidar'}</button>
+      </div>)}</div> : <p className="hint">Ninguém falou com o bot ainda. Mande o link do bot e peça para tocar em Iniciar: a pessoa aparece aqui em até 1 minuto.</p>}
     </div>
 
     <div className="card">

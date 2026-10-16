@@ -1,4 +1,6 @@
+import path from 'node:path';
 import { getSecret } from '../services/settings';
+import { readJson, writeJsonAtomic } from '../services/json-file';
 
 /**
  * Envio de ofertas para canais e grupos do Telegram pelo Bot API oficial (pedido do usuário em 2026-10-16).
@@ -22,9 +24,11 @@ async function botToken() {
 /** Erros do Telegram vêm como {ok:false, description}. Traduz os mais comuns para o painel. */
 function friendly(desc: string) {
   const d = desc || '';
-  if (/chat not found/i.test(d)) return 'Canal não encontrado. Confira o @nome (ou o ID) e se o bot já foi adicionado nele.';
+  if (/chat not found/i.test(d)) return 'Canal ou contato não encontrado. Confira o @nome (ou o ID). Canal: o bot precisa ter sido adicionado nele. Contato: a pessoa precisa abrir o bot no Telegram e tocar em "Iniciar" primeiro.';
   if (/bot is not a member|not enough rights|have no rights|CHAT_WRITE_FORBIDDEN|need administrator rights/i.test(d)) return 'O bot não tem permissão para publicar aí. Coloque o bot como administrador do canal (com "Publicar mensagens").';
-  if (/bot was kicked|bot was blocked|user is deactivated/i.test(d)) return 'O bot foi removido desse canal ou grupo. Adicione-o de novo.';
+  if (/bot was blocked/i.test(d)) return 'O contato bloqueou o bot no Telegram. Peça para ele desbloquear e tocar em "Iniciar" de novo.';
+  if (/bot can't initiate conversation|bot can not initiate/i.test(d)) return 'O bot só fala com quem abriu a conversa primeiro. Peça ao contato para abrir o bot e tocar em "Iniciar".';
+  if (/bot was kicked|user is deactivated/i.test(d)) return 'O bot foi removido desse canal ou grupo (ou a conta do contato foi desativada). Adicione-o de novo.';
   if (/Unauthorized/i.test(d)) return 'Token do bot inválido ou revogado. Gere um novo no @BotFather e salve na tela Telegram.';
   if (/wrong file identifier|failed to get HTTP URL content|IMAGE_PROCESS_FAILED|PHOTO_INVALID_DIMENSIONS|wrong type of the web page content/i.test(d)) return 'PHOTO:' + d;
   if (/Too Many Requests|retry after (\d+)/i.test(d)) return 'O Telegram pediu para esperar um pouco (limite de envios). A fila tenta de novo.';
@@ -60,33 +64,113 @@ export function normalizeTelegramChat(raw: string) {
   return '@' + name;
 }
 
+let botCache: { at: number; token: string; info: { id: number; username: string; name: string } } | null = null;
+/** Dados do bot (getMe). Fica em cache por 10 min: a tela pede a cada carregamento para montar o link t.me/bot. */
 export async function telegramBotInfo() {
+  const token = await botToken();
+  if (botCache && botCache.token === token && Date.now() - botCache.at < 10 * 60_000) return botCache.info;
   const me = await call<{ id: number; username: string; first_name: string }>('getMe');
-  return { id: me.id, username: me.username, name: me.first_name };
+  const info = { id: me.id, username: me.username, name: me.first_name };
+  botCache = { at: Date.now(), token, info };
+  return info;
 }
 
-/** Dados do canal/grupo e se o bot pode publicar nele. */
+/** Nome de exibição de um chat: título do canal/grupo ou nome da pessoa (contato no privado). */
+function chatTitle(chat: any) {
+  return chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(' ') || (chat.username ? `@${chat.username}` : String(chat.id));
+}
+
+/**
+ * Dados do canal/grupo (ou contato) e se o bot pode publicar nele.
+ * Contato (chat "private", pedido do usuário em 2026-10-16): o bot só consegue falar com quem já abriu a conversa com ele e
+ * tocou em "Iniciar"; se a pessoa ainda não fez isso, o getChat devolve "chat not found".
+ */
 export async function telegramChatInfo(chatId: string) {
   const chat = await call<any>('getChat', { chat_id: chatId });
+  const base: TelegramChat = { id: chat.id, type: chat.type, title: chatTitle(chat), username: chat.username };
+  if (chat.type === 'private') return { ...base, role: 'contato', canPost: true } as TelegramChat & { role: string; canPost: boolean; members?: number };
   const me = await telegramBotInfo();
   let role = 'desconhecido';
   try { role = (await call<any>('getChatMember', { chat_id: chat.id, user_id: me.id }))?.status || role; } catch { /* grupo sem permissão de ler membros: segue */ }
   const canPost = chat.type === 'channel' ? ['administrator', 'creator'].includes(role) : !['left', 'kicked'].includes(role);
-  const info: TelegramChat & { role: string; canPost: boolean; members?: number } = { id: chat.id, type: chat.type, title: chat.title || chat.first_name || chat.username || String(chat.id), username: chat.username, role, canPost };
+  const info: TelegramChat & { role: string; canPost: boolean; members?: number } = { ...base, role, canPost };
   try { info.members = await call<number>('getChatMemberCount', { chat_id: chat.id }); } catch { /* opcional */ }
   return info;
 }
 
-/** Canais e grupos em que o bot recebeu alguma atualização recente (adicionado, mensagem...). Ajuda a achar o ID. */
-export async function telegramDiscoverChats(): Promise<TelegramChat[]> {
-  const updates = await call<any[]>('getUpdates', { limit: 100, allowed_updates: ['message', 'channel_post', 'my_chat_member'] });
-  const map = new Map<number, TelegramChat>();
-  for (const u of updates || []) {
-    const chat = u.message?.chat || u.channel_post?.chat || u.my_chat_member?.chat;
-    if (!chat || chat.type === 'private') continue;
-    map.set(chat.id, { id: chat.id, type: chat.type, title: chat.title || String(chat.id), username: chat.username });
+/**
+ * Chats que o bot já viu (canal/grupo em que foi adicionado, contato que tocou em "Iniciar"...), guardados em .cache.
+ * O Telegram só entrega cada atualização uma vez depois de confirmada (offset) e descarta as de mais de 24 h, então
+ * em vez de reler sempre a fila crua, cada leitura confirma o que leu e grava aqui o que descobriu. Assim a tela
+ * "Descobrir" continua mostrando canais antigos e o cadastro automático de contatos (telegram-contacts.ts) nunca perde ninguém.
+ */
+export type SeenChat = TelegramChat & { seenAt: string; blocked?: boolean; isNew?: boolean };
+type ChatState = { offset: number; chats: Record<string, SeenChat> };
+const CHATS_FILE = path.resolve(__dirname, '../../.cache/telegram-chats.json');
+let chatState: ChatState | null = null;
+function loadChatState(): ChatState {
+  if (!chatState) { const j = readJson<Partial<ChatState>>(CHATS_FILE, {}); chatState = { offset: Number(j.offset) || 0, chats: j.chats && typeof j.chats === 'object' ? j.chats : {} }; }
+  return chatState;
+}
+function saveChatState() { try { if (chatState) writeJsonAtomic(CHATS_FILE, chatState); } catch (e: any) { console.warn('[telegram] não salvou a lista de chats:', e?.message || e); } }
+
+let polling: Promise<SeenChat[]> | null = null;
+/** Lê as atualizações novas do bot, atualiza a lista de chats vistos e devolve os chats que apareceram agora. */
+export function telegramPollUpdates(): Promise<SeenChat[]> {
+  if (polling) return polling;
+  polling = (async () => {
+    const st = loadChatState();
+    const fresh = new Map<number, SeenChat>();
+    for (let round = 0; round < 10; round++) {
+      const updates = await call<any[]>('getUpdates', { offset: st.offset || undefined, limit: 100, timeout: 0, allowed_updates: ['message', 'channel_post', 'my_chat_member'] });
+      if (!updates?.length) break;
+      for (const u of updates) {
+        st.offset = Math.max(st.offset, Number(u.update_id) + 1);
+        const chat = u.message?.chat || u.channel_post?.chat || u.my_chat_member?.chat;
+        if (!chat) continue;
+        const key = String(chat.id);
+        const status = u.my_chat_member?.new_chat_member?.status;
+        const was = st.chats[key];
+        const seen: SeenChat = { id: chat.id, type: chat.type, title: chatTitle(chat), username: chat.username, seenAt: new Date((Number(u.message?.date || u.channel_post?.date || u.my_chat_member?.date) || Date.now() / 1000) * 1000).toISOString() };
+        // Bot bloqueado pelo contato ou expulso do grupo: fica marcado, para a tela não oferecer e o automático não insistir.
+        if (status === 'kicked' || status === 'left') { st.chats[key] = { ...seen, blocked: true }; fresh.delete(chat.id); continue; }
+        st.chats[key] = seen;
+        if (!was || was.blocked) fresh.set(chat.id, seen);
+      }
+      if (updates.length < 100) break;
+    }
+    saveChatState();
+    return [...fresh.values()];
+  })().finally(() => { polling = null; });
+  return polling;
+}
+
+/** Tudo que o bot já viu e ainda pode receber mensagem (mais recente primeiro). Contato tem type "private". */
+export function telegramKnownChats(): SeenChat[] {
+  return Object.values(loadChatState().chats).filter(c => !c.blocked).sort((a, b) => (b.seenAt || '').localeCompare(a.seenAt || ''));
+}
+
+/** Canais, grupos e contatos conhecidos do bot, depois de ler o que chegou de novo. Ajuda a achar o ID. */
+export async function telegramDiscoverChats(): Promise<SeenChat[]> {
+  await telegramPollUpdates();
+  return telegramKnownChats();
+}
+
+/**
+ * Link de convite do grupo/canal para o bot mandar aos contatos (pedido do usuário em 2026-10-16: "adicionar contato no
+ * grupo de ofertas em lote"). O Bot API não deixa um bot colocar pessoas dentro de um grupo; o que ele pode é criar o
+ * link de convite (sendo administrador com "Convidar usuários via link") e mandar para cada contato entrar com um toque.
+ */
+export async function telegramInviteLink(chatId: string, username?: string | null) {
+  try {
+    const r = await call<any>('createChatInviteLink', { chat_id: chatId, name: 'Robô das Ofertas' });
+    if (r?.invite_link) return String(r.invite_link);
+  } catch (e: any) {
+    if (username) return `https://t.me/${username.replace(/^@/, '')}`;
+    throw new Error(`Não consegui criar o link de convite: ${e?.message || e} Coloque o bot como administrador do grupo com a permissão "Convidar usuários via link".`);
   }
-  return [...map.values()];
+  if (username) return `https://t.me/${username.replace(/^@/, '')}`;
+  throw new Error('O Telegram não devolveu o link de convite do grupo.');
 }
 
 /** Formatação do WhatsApp (*negrito*, ~riscado~, _itálico_) → HTML do Telegram, com o resto escapado. */
