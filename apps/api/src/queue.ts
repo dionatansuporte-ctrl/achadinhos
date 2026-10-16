@@ -45,10 +45,10 @@ export async function scheduleRetry(jobId: string, err?: any): Promise<RetryResu
   if (!job || job.status !== 'FAILED') return 'failed';
   if (isOfflineError(err)) {
     if (Date.now() - job.createdAt.getTime() < OFFLINE_MAX_MS) {
-      await prisma.promotionJob.update({ where: { id: jobId }, data: { status: 'PENDING', attempts: Math.max(0, job.attempts - 1), errorMessage: 'Esperando o WhatsApp reconectar.', scheduledAt: new Date(Date.now() + OFFLINE_RETRY_MS) } });
+      await prisma.promotionJob.update({ where: { id: jobId }, data: { status: 'PENDING', attempts: Math.max(0, job.attempts - 1), errorMessage: job.channel.type === 'TELEGRAM' ? 'Telegram sem resposta; tenta de novo em 1 minuto.' : 'Esperando o WhatsApp reconectar.', scheduledAt: new Date(Date.now() + OFFLINE_RETRY_MS) } });
       return 'waiting';
     }
-    const msg = `O WhatsApp ficou desconectado por mais de ${OFFLINE_MAX_MS / 3_600_000} horas; a oferta não foi enviada.`;
+    const msg = job.channel.type === 'TELEGRAM' ? `O Telegram ficou sem responder por mais de ${OFFLINE_MAX_MS / 3_600_000} horas; a oferta não foi enviada.` : `O WhatsApp ficou desconectado por mais de ${OFFLINE_MAX_MS / 3_600_000} horas; a oferta não foi enviada.`;
     await prisma.promotionJob.update({ where: { id: jobId }, data: { errorMessage: msg } }).catch(() => {});
     await prisma.automationLog.create({ data: { automationId: job.automationId, channel: job.channel.type, action: 'SEND', status: 'ERROR', message: msg } }).catch(() => {});
     return 'gave-up';

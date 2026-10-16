@@ -198,7 +198,7 @@ export default function Capture() {
                 key={c.id}
                 className={`chip-toggle ${sendTo[c.id] ? 'on' : ''}`}
                 onClick={() => setSendTo(v => ({ ...v, [c.id]: !v[c.id] }))}
-                title={c.type === 'WHATSAPP_GROUP' ? 'Grupo do WhatsApp' : c.type === 'WHATSAPP' ? 'Contato' : 'Instagram'}
+                title={c.type === 'WHATSAPP_GROUP' ? 'Grupo do WhatsApp' : c.type === 'WHATSAPP' ? 'Contato' : c.type === 'TELEGRAM' ? 'Canal do Telegram' : 'Instagram'}
               >{c.name}</button>
             )) : (
               <span className="hint" style={{ margin: 0 }}>Nenhum grupo ativo. <Link to="/channels">Conectar WhatsApp</Link></span>

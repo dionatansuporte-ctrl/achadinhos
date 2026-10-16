@@ -459,3 +459,16 @@ button.danger:disabled{opacity:.45;cursor:not-allowed}
 .wa-number{display:flex;align-items:center;flex-wrap:wrap;gap:10px;border:1px solid var(--border);border-radius:14px;padding:10px 14px;margin-top:10px;background:var(--surface-2)}
 .wa-number svg{color:#25d366;flex:none}
 .wa-number-name{flex:1;font-weight:700;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Tela Telegram (2026-10-16) */
+.tg-discover{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+.tg-channel{padding:18px}
+.tg-pick{cursor:pointer;position:relative;transition:border-color .15s,box-shadow .15s}
+.tg-pick:hover{border-color:var(--accent-border)}
+.tg-pick.sel{border-color:var(--accent-border);box-shadow:0 0 0 2px var(--accent-soft)}
+.tg-pick h4{font-size:13.5px;line-height:1.35;margin:0;color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tg-check{position:absolute;top:16px;left:16px}
+.tg-recent{display:flex;flex-direction:column;gap:8px}
+.tg-thumb{width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--surface-3);flex:none}
+.tg-thumb-empty{border:1px dashed var(--border-strong)}
+.tg-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13.5px;font-weight:700;padding:8px 12px;border-radius:12px}

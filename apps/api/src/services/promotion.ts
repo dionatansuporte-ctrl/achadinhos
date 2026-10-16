@@ -1,6 +1,7 @@
 import { prisma } from '../db';
 import { sendWhatsAppText } from '../integrations/whatsapp';
 import { publishInstagramImage } from '../integrations/instagram';
+import { sendTelegramOffer } from '../integrations/telegram';
 import { shopeeTrackedLink } from '../integrations/shopee';
 import { isOfflineError } from '../queue';
 
@@ -38,11 +39,17 @@ export async function executePromotionJob(jobId:string){
     if(tracked){
       payload.text=payload.text.split(payload.affiliateUrl).join(tracked);
       if(!payload.trackedUrl) await prisma.promotionJob.update({where:{id:jobId},data:{payloadJson:{...(job.payloadJson as any),trackedUrl:tracked}}}).catch(()=>{});
+      payload.trackedUrl=tracked;
     }
   }
   try{
     if(job.channel.type==='WHATSAPP') await sendWhatsAppText(job.channel.destination,payload.text||'');
     else if(job.channel.type==='WHATSAPP_GROUP') await sendToWhatsAppGroup(job.channel.destination,payload.text||'',payload.imageUrl,jobId);
+    else if(job.channel.type==='TELEGRAM'){
+      const r=await sendTelegramOffer(job.channel.destination,payload.text||'',payload.imageUrl);
+      // Guarda o id da mensagem para a tela Telegram poder montar o link t.me/... do post.
+      await prisma.promotionJob.update({where:{id:jobId},data:{payloadJson:{...(job.payloadJson as any),...(payload.trackedUrl?{trackedUrl:payload.trackedUrl}:{}),telegram:r}}}).catch(()=>{});
+    }
     else { if(!payload.imageUrl) throw new Error('Instagram exige imageUrl pública para publicação.'); await publishInstagramImage(payload.imageUrl,payload.text||''); }
   }catch(e:any){
     await prisma.promotionJob.update({where:{id:jobId},data:{status:'FAILED',errorMessage:e.message}}).catch(()=>{});

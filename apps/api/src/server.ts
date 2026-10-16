@@ -36,6 +36,7 @@ import { groupGrowth, startGroupGrowth, GROWTH_PERIODS, type GrowthPeriod } from
 import { guardOverview, saveGuardConfig, scanGroups, removeOne, startGroupGuard } from './services/group-guard';
 import QRCode from 'qrcode';
 import { readJson, writeJsonAtomic } from './services/json-file';
+import { normalizeTelegramChat, sendTelegramOffer, telegramBotInfo, telegramChatInfo, telegramDiscoverChats } from './integrations/telegram';
 
 // Sem JWT_SECRET a API não pode assinar logins nem conversar com o worker: avisa e não sobe.
 if(!process.env.JWT_SECRET){ console.error('JWT_SECRET não definido em apps/api/.env. Defina uma chave longa e aleatória e reinicie.'); process.exit(1); }
@@ -347,7 +348,7 @@ app.post('/api/products/import/amazon', requireAuth, asyncRoute(async(req:any,re
 
 app.get('/api/channels', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await prisma.channel.findMany({where:{userId:req.user.id},orderBy:{createdAt:'desc'}}))));
 app.post('/api/channels', requireAuth, asyncRoute(async(req:any,res:any)=>{
-  const body=z.object({type:z.enum(['WHATSAPP','WHATSAPP_GROUP','INSTAGRAM']),name:z.string().min(2),destination:z.string().min(2),configJson:z.any().optional()}).parse(req.body);
+  const body=z.object({type:z.enum(['WHATSAPP','WHATSAPP_GROUP','INSTAGRAM','TELEGRAM']),name:z.string().min(2),destination:z.string().min(2),configJson:z.any().optional()}).parse(req.body);
   res.status(201).json(await prisma.channel.create({data:{...body,userId:req.user.id}}));
 }));
 
@@ -968,15 +969,77 @@ app.post('/api/whatsapp/channels/pause', requireAuth, asyncRoute(async(req:any,r
 }));
 
 // Envio imediato de produtos para canais escolhidos (usado pela tela Capturar ofertas).
+// Todo job pertence a uma automação; envios manuais (Capturar ofertas, Telegram) ficam agrupados em uma fixa por usuário.
+async function manualAutomation(userId:string){
+  const found=await prisma.automation.findFirst({where:{userId,name:'Envio manual'}});
+  return found||prisma.automation.create({data:{userId,name:'Envio manual',description:'Envios feitos pelas telas Capturar ofertas e Telegram',template:defaultOfferTemplate(),status:'ACTIVE'}});
+}
+
+// ---------- Telegram (pedido do usuário em 2026-10-16): canais e grupos alimentados por um bot ----------
+// Link público da mensagem: canal com @nome → t.me/nome/ID; canal/grupo privado (-100...) → t.me/c/<id>/ID.
+function telegramPostLink(destination:string,tg:any){
+  const id=tg?.messageId; if(!id) return null;
+  if(destination.startsWith('@')) return `https://t.me/${destination.slice(1)}/${id}`;
+  const chat=String(tg?.chatId||destination); const m=/^-100(\d+)$/.exec(chat);
+  return m?`https://t.me/c/${m[1]}/${id}`:null;
+}
+app.get('/api/telegram', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const channels=await prisma.channel.findMany({where:{userId:req.user.id,type:'TELEGRAM'},orderBy:{createdAt:'asc'},select:{id:true,name:true,destination:true,enabled:true,createdAt:true}});
+  const jobs=channels.length?await prisma.promotionJob.findMany({where:{channelId:{in:channels.map(c=>c.id)}},orderBy:{createdAt:'desc'},take:60,
+    select:{id:true,status:true,errorMessage:true,createdAt:true,sentAt:true,payloadJson:true,product:{select:{title:true,imageUrl:true,price:true}},channel:{select:{id:true,name:true,destination:true}}}}):[];
+  res.json({
+    configured:!!(await getSecret('TELEGRAM_BOT_TOKEN')),
+    channels,
+    recent:jobs.map(j=>{const p:any=j.payloadJson||{};return {id:j.id,status:j.status,error:j.errorMessage,createdAt:j.createdAt,sentAt:j.sentAt,title:j.product?.title||p.title||'(sem título)',imageUrl:j.product?.imageUrl||p.imageUrl||null,price:j.product?.price!=null?Number(j.product.price):null,channel:j.channel,link:telegramPostLink(j.channel.destination,p.telegram)}})
+  });
+}));
+// Confere o token (getMe) e, se pedido, um canal específico (getChat + permissão do bot).
+app.post('/api/telegram/test', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({destination:z.string().trim().optional()}).parse(req.body||{});
+  try{
+    const bot=await telegramBotInfo();
+    const chat=body.destination?await telegramChatInfo(normalizeTelegramChat(body.destination)):null;
+    res.json({bot,chat});
+  }catch(e:any){ res.status(400).json({error:e.message}); }
+}));
+app.post('/api/telegram/discover', requireAuth, asyncRoute(async(_req:any,res:any)=>{
+  try{ res.json({chats:await telegramDiscoverChats()}); }catch(e:any){ res.status(400).json({error:e.message}); }
+}));
+// Cadastra um canal/grupo do Telegram depois de conferir que o bot consegue falar nele.
+app.post('/api/telegram/channels', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({destination:z.string().trim().min(2),name:z.string().trim().max(80).optional()}).parse(req.body);
+  let destination:string; try{ destination=normalizeTelegramChat(body.destination); }catch(e:any){ return res.status(400).json({error:e.message}); }
+  let info; try{ info=await telegramChatInfo(destination); }catch(e:any){ return res.status(400).json({error:e.message}); }
+  // Depois do getChat o ID numérico é definitivo (o @nome pode mudar); guarda o @nome quando existir, que dá link público.
+  const dest=info.username?`@${info.username}`:String(info.id);
+  const dup=await prisma.channel.findFirst({where:{userId:req.user.id,type:'TELEGRAM',destination:{in:[dest,destination,String(info.id)]}}});
+  if(dup) return res.status(409).json({error:`Esse canal já está cadastrado como "${dup.name}".`});
+  const channel=await prisma.channel.create({data:{userId:req.user.id,type:'TELEGRAM',name:body.name||info.title,destination:dest,configJson:{chatId:info.id,chatType:info.type,username:info.username||null}}});
+  res.status(201).json({channel,info,warning:info.canPost?null:'O bot ainda não é administrador desse canal: coloque-o como administrador com permissão de publicar, senão os envios falham.'});
+}));
+// Mensagem de teste direta (sem passar pela fila) para ver se chega no canal.
+app.post('/api/telegram/channels/:id/test', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const c=await prisma.channel.findFirst({where:{id:req.params.id,userId:req.user.id,type:'TELEGRAM'}}); if(!c) return res.status(404).json({error:'Canal não encontrado.'});
+  try{ const r=await sendTelegramOffer(c.destination,`✅ *Teste do Robô das Ofertas*\nAs promoções vão chegar aqui em "${c.name}".`); res.json({ok:true,link:telegramPostLink(c.destination,r)}); }
+  catch(e:any){ res.status(400).json({error:e.message}); }
+}));
+// Mensagem avulsa (texto livre, foto opcional) para os canais do Telegram escolhidos, pela fila.
+app.post('/api/telegram/message', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({channelIds:z.array(z.string()).min(1),text:z.string().trim().min(1).max(4000),imageUrl:httpUrl().optional().or(z.literal(''))}).parse(req.body);
+  const channels=await prisma.channel.findMany({where:{id:{in:body.channelIds},userId:req.user.id,type:'TELEGRAM',enabled:true}});
+  if(!channels.length) return res.status(400).json({error:'Nenhum canal do Telegram ativo selecionado.'});
+  const manual=await manualAutomation(req.user.id);
+  for(const c of channels) await prisma.promotionJob.create({data:{automationId:manual.id,channelId:c.id,scheduledAt:new Date(),payloadJson:{title:body.text.split('\n')[0].slice(0,80),text:body.text,affiliateUrl:'',imageUrl:body.imageUrl||undefined}}});
+  res.status(201).json({count:channels.length});
+}));
+
 app.post('/api/offers/send-now', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const body=z.object({productIds:z.array(z.string()).min(1),channelIds:z.array(z.string()).min(1),template:z.string().optional(),fromTo:z.boolean().optional()}).parse(req.body);
   const products=await prisma.product.findMany({where:{id:{in:body.productIds},account:{userId:req.user.id}}});
   const channels=await prisma.channel.findMany({where:{id:{in:body.channelIds},userId:req.user.id,enabled:true}});
   if(!products.length) return res.status(400).json({error:'Nenhum produto válido.'});
   if(!channels.length) return res.status(400).json({error:'Nenhum canal ativo selecionado.'});
-  // Todo job pertence a uma automação; envios manuais ficam agrupados em uma fixa por usuário.
-  let manual=await prisma.automation.findFirst({where:{userId:req.user.id,name:'Envio manual'}});
-  if(!manual) manual=await prisma.automation.create({data:{userId:req.user.id,name:'Envio manual',description:'Envios feitos pela tela Capturar ofertas',template:defaultOfferTemplate(),status:'ACTIVE'}});
+  const manual=await manualAutomation(req.user.id);
   // Envio manual sempre usa o modelo padrão atual (o gravado em "Envio manual" é só registro).
   let template=body.template||defaultOfferTemplate();
   // Opção "De R$ tanto por R$ tanto": mostra ou esconde a linha do preço antigo.
@@ -1237,6 +1300,7 @@ app.get('/api/integrations/status', requireAuth, asyncRoute(async(req:any,res:an
     amazon:{configured:await has('AMAZON_PARTNER_TAG'),connected:await has('AMAZON_PARTNER_TAG'),api:await has('AMAZON_CREDENTIAL_ID','AMAZON_CREDENTIAL_SECRET'),vars:['AMAZON_PARTNER_TAG','AMAZON_CREDENTIAL_ID','AMAZON_CREDENTIAL_SECRET']},
     whatsapp:{configured:await has('META_ACCESS_TOKEN','META_PHONE_NUMBER_ID'),connected:await has('META_ACCESS_TOKEN','META_PHONE_NUMBER_ID'),vars:['META_ACCESS_TOKEN','META_PHONE_NUMBER_ID','META_WABA_ID']},
     instagram:{configured:await has('META_ACCESS_TOKEN','META_IG_USER_ID'),connected:await has('META_ACCESS_TOKEN','META_IG_USER_ID'),vars:['META_ACCESS_TOKEN','META_IG_USER_ID']},
+    telegram:{configured:await has('TELEGRAM_BOT_TOKEN'),connected:await has('TELEGRAM_BOT_TOKEN'),vars:['TELEGRAM_BOT_TOKEN']},
     email:{configured:await has('SMTP_HOST','SMTP_USER','SMTP_PASS'),connected:await has('SMTP_HOST','SMTP_USER','SMTP_PASS'),vars:['SMTP_HOST','SMTP_PORT','SMTP_USER','SMTP_PASS','SMTP_FROM']}
   });
 }));

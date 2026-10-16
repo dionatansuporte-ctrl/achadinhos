@@ -16,6 +16,7 @@ enum ChannelType {
   WHATSAPP
   WHATSAPP_GROUP
   INSTAGRAM
+  TELEGRAM
 }
 enum AutomationStatus {
   DRAFT

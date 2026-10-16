@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { TicketPercent, Plus, Trash2, Send, Power, RefreshCw, ClipboardPaste, MessageCircle, Instagram, Clock3, Zap } from 'lucide-react';
+import { TicketPercent, Plus, Trash2, Send, Power, RefreshCw, ClipboardPaste, MessageCircle, Instagram, Clock3, Zap, SendHorizontal } from 'lucide-react';
 import { api } from './api';
 import { notify } from './notify';
 import { brl, typingMoney, blurMoney } from './money';
@@ -79,7 +79,7 @@ export default function Coupons() {
       </div>
 
       <label>Grupos que recebem o listão</label>
-      {channels.length ? <div className="niche-grid"><button type="button" className={(sch.channelIds || []).length ? '' : 'chosen'} title="Vai para os grupos das automações deste marketplace; grupo novo entra sozinho" onClick={() => saveSchedule({ channelIds: [] })}><Zap size={14} /> Automático</button>{channels.map(c => { const on = (sch.channelIds || []).includes(c.id); return <button key={c.id} type="button" className={on ? 'chosen' : ''} onClick={() => saveSchedule({ channelIds: on ? (sch.channelIds || []).filter((x: string) => x !== c.id) : [...(sch.channelIds || []), c.id] })}>{c.type === 'INSTAGRAM' ? <Instagram size={14} /> : <MessageCircle size={14} />} {c.name}</button>; })}</div> : <p className="hint">Nenhum canal ativo. Conecte o WhatsApp em Canais.</p>}
+      {channels.length ? <div className="niche-grid"><button type="button" className={(sch.channelIds || []).length ? '' : 'chosen'} title="Vai para os grupos das automações deste marketplace; grupo novo entra sozinho" onClick={() => saveSchedule({ channelIds: [] })}><Zap size={14} /> Automático</button>{channels.map(c => { const on = (sch.channelIds || []).includes(c.id); return <button key={c.id} type="button" className={on ? 'chosen' : ''} onClick={() => saveSchedule({ channelIds: on ? (sch.channelIds || []).filter((x: string) => x !== c.id) : [...(sch.channelIds || []), c.id] })}>{c.type === 'INSTAGRAM' ? <Instagram size={14} /> : c.type === 'TELEGRAM' ? <SendHorizontal size={14} /> : <MessageCircle size={14} />} {c.name}</button>; })}</div> : <p className="hint">Nenhum canal ativo. Conecte o WhatsApp em Canais.</p>}
       {(sch.channelIds || []).length
         ? <p className="hint">Só os grupos marcados recebem. Clique em <b>Automático</b> para voltar a seguir as automações {mktName(mkt)}.</p>
         : <p className="hint"><b>Automático:</b> o listão vai para os grupos das automações {mktName(mkt)} ativas{sch.groups?.length ? <> (hoje: {sch.groups.map((g: any) => g.name).join(', ')})</> : ' (nenhum ainda)'}. Grupo novo entra sozinho assim que for usado numa automação {mktName(mkt)}. Cupom do Mercado Livre nunca cai em grupo Shopee, e vice-versa.</p>}

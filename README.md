@@ -16,6 +16,7 @@ Projeto full-stack para automatizar achadinhos/ofertas de afiliados, inspirado n
 - Worker com retry e histórico de execução.
 - WhatsApp Cloud API oficial para envio por contato.
 - Instagram Graph API preparada para publicação de imagem.
+- Telegram: tela própria no menu; um bot do @BotFather publica as ofertas em canais e grupos (tipo de canal `TELEGRAM`, token em `TELEGRAM_BOT_TOKEN`), com foto, negrito e link rastreado, usável também pelas automações, Capturar ofertas e listão de cupons.
 - Cadastro de canais, automações, listas e logs.
 - Interface responsiva em português, com tema escuro/laranja semelhante ao mockup.
 - Shopee Affiliate Open API preparada por configuração, sem scraping.
