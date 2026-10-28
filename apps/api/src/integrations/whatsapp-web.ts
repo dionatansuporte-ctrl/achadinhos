@@ -3,13 +3,16 @@ import fs from 'node:fs';
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { readJson, writeJsonAtomic } from '../services/json-file';
-import makeWASocket, {
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  useMultiFileAuthState,
-  WAMessageStubType,
-  type WASocket
-} from '@whiskeysockets/baileys';
+import type { WASocket } from '@whiskeysockets/baileys';
+
+// Baileys 7 (desde 2026-10-28): na 6.7 a oferta nos grupos novos (endereçados por @lid) saía assinada pelo telefone,
+// e o WhatsApp mostrava só o número, sem o nome do perfil. A 7 é só ESM e depende do whatsapp-rust-bridge, que não
+// carrega por require(); por isso entra por import(), na primeira conexão.
+type Baileys = typeof import('@whiskeysockets/baileys');
+let baileys: Baileys | null = null;
+const loadBaileys = async () => (baileys ||= await import('@whiskeysockets/baileys'));
+// Só usado dentro dos eventos do socket, quando a biblioteca já foi carregada.
+const lib = () => baileys!;
 
 /**
  * Sessões do WhatsApp via WhatsApp Web (Baileys), para envio em grupos.
@@ -104,6 +107,7 @@ process.on('unhandledRejection', (e: any) => console.error('[whatsapp] erro não
 /** Tipo de entrada/saída de uma mensagem de sistema do grupo (null = não é entrada nem saída). */
 function groupMoveKind(stub: number | null | undefined, author: string | null | undefined, members: string[] | null | undefined): WaGroupMove['kind'] | null {
   const self = !!author && (members || []).some(j => j.split('@')[0].split(':')[0] === author.split('@')[0].split(':')[0]);
+  const { WAMessageStubType } = lib();
   switch (stub) {
     case WAMessageStubType.GROUP_PARTICIPANT_INVITE:
     case WAMessageStubType.GROUP_PARTICIPANT_ADD_REQUEST_JOIN: return 'LINK';
@@ -177,9 +181,44 @@ class WaSession {
   }
   log(text: string) { console.log(`[whatsapp${this.id === MAIN_SESSION ? '' : ` ${this.id}`}] ${text}`); }
 
+  // Nome do perfil (pedido do usuário em 2026-10-28): sem nome, nos grupos a oferta aparece só com o número.
+  // Fica em disco junto da sessão; dá para escolher antes de escanear o QR e ele é aplicado quando conectar.
+  get nameFile() { return path.join(this.dir, 'profile-name.txt'); }
+  wantedName(): string | null {
+    try { return fs.readFileSync(this.nameFile, 'utf8').trim() || null; } catch { return null; }
+  }
+
+  /** Guarda o nome e, se o número estiver conectado, já troca o nome do perfil no WhatsApp. */
+  async setProfileName(name: string) {
+    fs.mkdirSync(this.dir, { recursive: true });
+    fs.writeFileSync(this.nameFile, name);
+    if (this.sock && this.status === 'connected') await this.applyProfileName();
+  }
+
+  async applyProfileName() {
+    const name = this.wantedName();
+    const s = this.sock;
+    if (!name || !s) return;
+    if (name !== this.me?.name) {
+      await s.updateProfileName(name);
+      if (this.me) this.me.name = name;
+      this.log(`Nome do perfil agora é "${name}".`);
+    }
+    await this.announceName(s, name);
+  }
+
+  // O servidor do WhatsApp só põe o nome nas mensagens (o "~Nome" ao lado do número nos grupos)
+  // depois que o aparelho manda a presença com esse nome; trocar o nome sozinho não basta.
+  async announceName(s: WASocket, name: string) {
+    const creds = (s as any).authState?.creds;
+    if (creds?.me && creds.me.name !== name) creds.me.name = name;
+    await s.sendPresenceUpdate('available');
+    await s.sendPresenceUpdate('unavailable');
+  }
+
   state() {
     const { id, status, me, connectedAt, removedAt } = this;
-    return { id, main: id === MAIN_SESSION, disposable: isDisposable(id), status, qr: this.qrDataUrl, me, error: this.lastError, connectedAt, pairedAt: this.pairedAt(), removedAt, hasSession: this.hasSavedSession() };
+    return { id, main: id === MAIN_SESSION, disposable: isDisposable(id), status, qr: this.qrDataUrl, me, wantedName: this.wantedName(), error: this.lastError, connectedAt, pairedAt: this.pairedAt(), removedAt, hasSession: this.hasSavedSession() };
   }
 
   /** Tem sessão pareada salva? (o creds.json só ganha o "me" depois que o QR code é escaneado). */
@@ -230,6 +269,7 @@ class WaSession {
     this.qrDataUrl = null;
     fs.mkdirSync(this.dir, { recursive: true });
 
+    const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = await loadBaileys();
     const { state, saveCreds } = await useMultiFileAuthState(this.dir);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -250,6 +290,8 @@ class WaSession {
     this.sock = s;
 
     s.ev.on('creds.update', saveCreds);
+    // Nome do perfil trocado (por aqui ou pelo celular): mantém o que aparece na tela em dia.
+    s.ev.on('creds.update', (c) => { if (this.sock === s && c.me?.name && this.me) this.me.name = c.me.name; });
 
     // Mensagens novas no privado: quem quiser tratá-las se registra em onWhatsAppMessage.
     s.ev.on('messages.upsert', ({ messages, type }) => {
@@ -262,7 +304,9 @@ class WaSession {
         // Sem texto: áudio, foto, figurinha etc. também são entregues, para o cliente nunca ficar sem resposta.
         const media = text ? null : messageMedia(msg);
         if (!text && !media) continue;
-        const phone = jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0].split(':')[0] : null;
+        // Conversa pelo @lid: o telefone vem no endereço alternativo (Baileys 7), quando o WhatsApp informa.
+        const pnJid = jid.endsWith('@s.whatsapp.net') ? jid : msg.key?.remoteJidAlt?.endsWith('@s.whatsapp.net') ? msg.key.remoteJidAlt : '';
+        const phone = pnJid ? pnJid.split('@')[0].split(':')[0] : null;
         const at = msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date();
         // Mensagem antiga (sincronização ao reconectar) não pode disparar resposta agora.
         if (Date.now() - at.getTime() > 5 * 60_000) continue;
@@ -320,10 +364,13 @@ class WaSession {
           return;
         }
         this.refreshGroups().catch(() => {});
+        // Nome escolhido na hora do QR code (ou antes): aplica agora que conectou.
+        this.applyProfileName().catch(e => this.log(`Não consegui trocar o nome do perfil: ${e?.message || e}`));
       }
       if (u.connection === 'close') {
         const err = u.lastDisconnect?.error as any;
         const code = err?.output?.statusCode;
+        const { DisconnectReason } = lib();
         const wasQr = this.status === 'qr';
         this.sock = null;
         this.qrDataUrl = null;
@@ -388,7 +435,7 @@ class WaSession {
     const mine = new Set([this.me?.id, (this.sock?.user as any)?.lid].filter(Boolean).map(j => String(j).split('@')[0].split(':')[0]));
     const isMe = (j?: string) => !!j && mine.has(j.split('@')[0].split(':')[0]);
     const list = Object.values(all).map(g => {
-      const admin = (g.participants || []).some((p: any) => !!p.admin && (isMe(p.id) || isMe(p.jid) || isMe(p.lid)));
+      const admin = (g.participants || []).some((p: any) => !!p.admin && (isMe(p.id) || isMe(p.phoneNumber) || isMe(p.lid)));
       return { id: g.id, name: g.subject || g.id, participants: g.participants?.length || 0, session: this.id, sessions: [this.id], admins: admin ? [this.id] : [] };
     });
     for (const g of list) groupNames.set(g.id, g.name);
@@ -454,6 +501,11 @@ export function addWaSession(): string {
   if (!id) { let n = 2; while (sessions.has(`n${n}`)) n++; id = `n${n}`; }
   session(id).connect().catch(() => {});
   return id;
+}
+
+/** Nome que aparece nos grupos para este número (aplica já se estiver conectado, senão quando conectar). */
+export async function setWaProfileName(id: string, name: string) {
+  await session(id).setProfileName(name);
 }
 
 export async function connectWhatsAppWeb(id: string = MAIN_SESSION): Promise<void> {
@@ -596,7 +648,7 @@ export async function listGroupMembers(groupId: string, via?: string): Promise<{
   const myPhone = s.me?.id || '';
   const members = meta.participants
     .map(p => {
-      const pn = p.jid && p.jid.endsWith('@s.whatsapp.net') ? p.jid : p.id.endsWith('@s.whatsapp.net') ? p.id : '';
+      const pn = p.phoneNumber && p.phoneNumber.endsWith('@s.whatsapp.net') ? p.phoneNumber : p.id.endsWith('@s.whatsapp.net') ? p.id : '';
       const phone = pn ? pn.split('@')[0].split(':')[0] : null;
       return { jid: pn || p.id, phone, admin: !!p.admin };
     })
@@ -727,7 +779,7 @@ async function groupMetaFor(groupId: string, fresh = false): Promise<GroupMeta> 
     try {
       const meta = await s.socket().groupMetadata(groupId);
       const mine = mineIds(s);
-      const admin = (meta.participants || []).some(p => !!p.admin && (mine.has(bare(p.id)) || mine.has(bare(p.jid)) || mine.has(bare(p.lid))));
+      const admin = (meta.participants || []).some(p => !!p.admin && (mine.has(bare(p.id)) || mine.has(bare(p.phoneNumber)) || mine.has(bare(p.lid))));
       best = { session: s, meta, admin, at: Date.now() };
       if (admin) break;
     } catch (e) { lastError = e; }
@@ -740,15 +792,15 @@ async function groupMetaFor(groupId: string, fresh = false): Promise<GroupMeta> 
 /** Um membro do grupo: o id com que o WhatsApp o chama ali, o telefone (se souber), se é administrador e se é um número nosso. */
 export type WaGroupMemberInfo = { id: string; phone: string | null; name: string | null; admin: boolean; mine: boolean };
 
-function participantInfo(p: { id: string; jid?: string; lid?: string; admin?: string | null; name?: string; notify?: string }): WaGroupMemberInfo {
-  const pn = p.jid && p.jid.endsWith('@s.whatsapp.net') ? p.jid : p.id.endsWith('@s.whatsapp.net') ? p.id : '';
-  const mine = isOurNumber(p.id) || (!!p.jid && isOurNumber(p.jid)) || (!!p.lid && isOurNumber(p.lid));
+function participantInfo(p: { id: string; phoneNumber?: string; lid?: string; admin?: string | null; name?: string; notify?: string }): WaGroupMemberInfo {
+  const pn = p.phoneNumber && p.phoneNumber.endsWith('@s.whatsapp.net') ? p.phoneNumber : p.id.endsWith('@s.whatsapp.net') ? p.id : '';
+  const mine = isOurNumber(p.id) || (!!p.phoneNumber && isOurNumber(p.phoneNumber)) || (!!p.lid && isOurNumber(p.lid));
   return { id: p.id, phone: pn ? bare(pn) : null, name: p.notify || p.name || null, admin: !!p.admin, mine };
 }
 
 const findParticipant = (meta: GroupMeta['meta'], member: string) => {
   const key = bare(member);
-  return (meta.participants || []).find(p => bare(p.id) === key || bare(p.jid) === key || bare(p.lid) === key);
+  return (meta.participants || []).find(p => bare(p.id) === key || bare(p.phoneNumber) === key || bare(p.lid) === key);
 };
 
 /** Dados de um membro do grupo (null = não está nele). Se não achar na lista guardada, lê o grupo de novo. */

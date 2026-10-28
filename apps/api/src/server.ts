@@ -19,7 +19,7 @@ import { titleKey } from './services/title-key';
 import { salesReport, clearSalesCache } from './services/reports';
 import { createBackup, listBackups, backupPath, deleteBackup, BACKUP_DIR } from './services/backup';
 import { startScheduler, describeSchedule } from './services/scheduler';
-import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, waGroupSessions, resolvePhoneJid, sendWhatsAppWebText, sessionForJid } from './integrations/whatsapp-web';
+import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, setWaProfileName, waGroupSessions, resolvePhoneJid, sendWhatsAppWebText, sessionForJid } from './integrations/whatsapp-web';
 import { requireAuth } from './middleware/auth';
 import { hashPassword, verifyPassword, issueSession } from './services/auth';
 import { isMailConfigured, sendMail, sendPasswordResetCode } from './services/mailer';
@@ -602,6 +602,17 @@ app.post('/api/whatsapp/sessions', requireAuth, asyncRoute(async(req:any,res:any
   // No máximo 4 contas (pedido do usuário em 2026-10-08): a principal e mais 3. O descartável não conta.
   if(listWaSessions().filter(s=>!s.disposable).length>=4) return res.status(409).json({error:'Já são 4 números, o máximo. Desconecte algum antes de adicionar outro.'});
   res.status(201).json(getWaState(addWaSession()));
+}));
+
+// Nome que aparece nos grupos no lugar do número (pedido do usuário em 2026-10-28). Até 25 letras (limite do WhatsApp).
+app.post('/api/whatsapp/profile-name', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const parsed=z.object({session:SESSION_ID.default('principal'),name:z.string().trim().min(1,'Escreva o nome.').max(25,'O WhatsApp aceita até 25 letras no nome.')}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:parsed.error.issues[0]?.message||'Nome inválido.'});
+  const body=parsed.data;
+  if(!listWaSessions().some(s=>s.id===body.session)) return res.status(404).json({error:'Esse número não está mais na lista.'});
+  try{ await setWaProfileName(body.session,body.name); }catch(e:any){ return res.status(409).json({error:'Desculpe, o WhatsApp não aceitou o nome agora: '+(e?.message||e)+'. Tente de novo daqui a pouco.'}); }
+  res.json(getWaState(body.session));
 }));
 
 app.post('/api/whatsapp/logout', requireAuth, asyncRoute(async(req:any,res:any)=>{ if(!requireAdmin(req,res))return; await logoutWhatsAppWeb(sessionBody(req)); res.json({ok:true}); }));

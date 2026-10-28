@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { CheckCircle2, LogOut, MessageCircle, Pause, Play, Plus, RefreshCw, Smartphone } from 'lucide-react';
+import { CheckCircle2, LogOut, Pencil, MessageCircle, Pause, Play, Plus, RefreshCw, Smartphone } from 'lucide-react';
 import { api } from './api';
 import GroupContacts from './GroupContacts';
 import GroupGrowth from './GroupGrowth';
 
 // Um número de WhatsApp pareado (ou pareando). "principal" é o primeiro; os outros são n2, n3...
 // O descartável (disposable) tem a sua própria tela, "Número descartável": aqui ele não aparece.
-type Session = { id: string; main: boolean; disposable?: boolean; status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; error?: string | null; hasSession?: boolean };
+type Session = { id: string; main: boolean; disposable?: boolean; status: 'disconnected' | 'connecting' | 'qr' | 'connected'; qr?: string | null; me?: { id: string; name?: string } | null; wantedName?: string | null; error?: string | null; hasSession?: boolean };
 type Group = { id: string; name: string; participants: number; session?: string; sessions?: string[] };
 type Channel = { id: string; type: string; destination: string; enabled: boolean };
 
@@ -19,6 +19,7 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
+  const [editing, setEditing] = useState<string | null>(null); // número com o campo de nome aberto
 
   const refresh = () => api.get('/api/whatsapp/status').then(r => setSessions((r.data.sessions || []).filter((s: Session) => !s.disposable))).catch(() => {});
   const pairing = (s: Session) => s.status === 'connecting' || s.status === 'qr';
@@ -56,6 +57,18 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
     if (s.status === 'connected' && !confirm(`Desconectar o WhatsApp +${s.me?.id || ''}? Será preciso escanear o QR code de novo, e os grupos dele param de receber ofertas.`)) return;
     setBusy(true);
     try { await api.post('/api/whatsapp/logout', { session: s.id }); setPicked({}); await refresh(); }
+    finally { setBusy(false); }
+  }
+
+  // Nome que aparece nos grupos no lugar do número (pedido do usuário em 2026-10-28).
+  async function saveName(s: Session, name: string) {
+    setMsg(''); setBusy(true);
+    try {
+      await api.post('/api/whatsapp/profile-name', { session: s.id, name });
+      setEditing(null);
+      setMsg(s.status === 'connected' ? `Pronto! Agora as ofertas saem com o nome "${name.trim()}".` : `Combinado! Assim que o QR code for lido, o número vai aparecer como "${name.trim()}".`);
+      await refresh();
+    } catch (e: any) { setMsg(e?.response?.data?.error || 'Desculpe, não consegui salvar o nome. Tente de novo.'); }
     finally { setBusy(false); }
   }
 
@@ -115,11 +128,18 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
           {s.status === 'connected' && (
             <div className="wa-number">
               <Smartphone size={18} />
-              <span className="wa-number-name">+{s.me?.id}{s.me?.name ? ` · ${s.me.name}` : ''}</span>
+              <span className="wa-number-name">{s.me?.name ? <>{s.me.name} <small className="muted">+{s.me?.id}</small></> : <>+{s.me?.id} <small className="muted">· sem nome</small></>}</span>
               {s.main && <span className="badge badge-ready">Principal</span>}
               <span className="badge badge-on">Conectado</span>
+              <button className="outline" disabled={busy} onClick={() => setEditing(editing === s.id ? null : s.id)}><Pencil size={16} /> {s.me?.name ? 'Mudar nome' : 'Dar um nome'}</button>
               <button className="outline" disabled={busy} onClick={() => logout(s)}><LogOut size={16} /> Desconectar</button>
             </div>
+          )}
+          {s.status === 'connected' && !s.me?.name && editing !== s.id && (
+            <p className="hint" style={{ marginTop: 4 }}>Este número está sem nome no WhatsApp, então nos grupos a oferta aparece só com o número. Clique em <b>Dar um nome</b> para aparecer o nome da sua loja.</p>
+          )}
+          {s.status === 'connected' && editing === s.id && (
+            <NameField initial={s.me?.name || s.wantedName || ''} busy={busy} onSave={name => saveName(s, name)} onCancel={() => setEditing(null)} />
           )}
 
           {/* Nenhum número conectado ainda: o convite grande para conectar o primeiro. */}
@@ -148,6 +168,7 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
               {!s.main && <p className="muted" style={{ margin: 0 }}><b>Novo número:</b> escaneie com o celular do número que você quer adicionar.</p>}
               {s.qr ? <img src={s.qr} alt="QR code do WhatsApp" className="wa-qr" /> : <div className="wa-qr wa-qr-wait">Gerando QR...</div>}
               <p className="muted" style={{ maxWidth: 420 }}>No celular: <b>WhatsApp → Dispositivos conectados → Conectar dispositivo</b> e aponte para o código.</p>
+              <NameField key={s.id + (s.wantedName || '')} initial={s.wantedName || ''} busy={busy} onSave={name => saveName(s, name)} />
               <button className="outline" onClick={() => logout(s)}>Cancelar</button>
             </div>
           )}
@@ -200,6 +221,24 @@ export default function WhatsAppWeb({ channels, onChanged }: { channels: Channel
       )}
 
       {msg && <p className="inline-msg">{msg}</p>}
+    </div>
+  );
+}
+
+/** Campo do nome que aparece nos grupos. Mostrado ao ler o QR code e ao clicar em "Mudar nome". */
+function NameField({ initial, busy, onSave, onCancel }: { initial: string; busy: boolean; onSave: (name: string) => void; onCancel?: () => void }) {
+  const [name, setName] = useState(initial);
+  const saved = !!initial && name.trim() === initial;
+  return (
+    <div style={{ width: '100%', maxWidth: 420, marginTop: 8 }}>
+      <label style={{ display: 'block' }}>Nome que vai aparecer nos grupos
+        <div className="form-row form-row-tight" style={{ marginTop: 4 }}>
+          <input value={name} maxLength={25} placeholder="Ex.: Ofertas da Hora" onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && name.trim()) onSave(name); }} />
+          <button className="primary" disabled={busy || !name.trim() || saved} onClick={() => onSave(name)}>{saved ? 'Salvo' : 'Salvar nome'}</button>
+          {onCancel && <button className="outline" disabled={busy} onClick={onCancel}>Cancelar</button>}
+        </div>
+      </label>
+      <p className="hint" style={{ margin: '4px 0 0' }}>Vira o nome do perfil desse WhatsApp (até 25 letras). Nas ofertas dos grupos aparece esse nome em vez de só o número.</p>
     </div>
   );
 }
