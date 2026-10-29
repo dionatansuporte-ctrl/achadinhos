@@ -472,3 +472,9 @@ button.danger:disabled{opacity:.45;cursor:not-allowed}
 .tg-thumb{width:52px;height:52px;border-radius:10px;object-fit:cover;background:var(--surface-3);flex:none}
 .tg-thumb-empty{border:1px dashed var(--border-strong)}
 .tg-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:13.5px;font-weight:700;padding:8px 12px;border-radius:12px}
+
+/* Tabela simples (quadro "Link principal dos grupos" em Canais) */
+.table{width:100%;border-collapse:collapse;font-size:14px}
+.table th,.table td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border,#e6e6ef);vertical-align:middle}
+.table th{font-weight:600;color:var(--muted,#6b6b80);font-size:12.5px}
+.table td button{padding:6px 10px;font-size:13px}

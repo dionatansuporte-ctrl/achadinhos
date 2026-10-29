@@ -67,6 +67,25 @@ function pinMessage(l: StoreLink) {
 
 export type MainLinkResult = { channelId: string; name: string; ok: boolean; message: string };
 
+export type MainLinkStatus = {
+  groups: { channelId: string; name: string; enabled: boolean; stores: string[]; pinnedAt: number | null; renewAt: number | null }[];
+  /** Grupos em que o robô está mas que ainda não são canal (ex.: grupo recém-criado). */
+  unregistered: { id: string; name: string; admin: boolean }[];
+};
+
+/** Quadro da tela Canais: cada grupo com a loja e o estado da fixada, e os grupos ainda não cadastrados. */
+export async function mainLinkStatus(userId: string, waGroups: { id: string; name: string; admins: string[] }[]): Promise<MainLinkStatus> {
+  const channels = await prisma.channel.findMany({ where: { userId, type: 'WHATSAPP_GROUP' }, orderBy: { name: 'asc' } });
+  const links = await linksByChannel(userId);
+  const groups = channels.map(c => {
+    const p = (c.configJson as any)?.mainLinkPin as PinState | undefined;
+    return { channelId: c.id, name: c.name, enabled: c.enabled, stores: (links.get(c.id) || []).map(l => marketplaceName(l.marketplace)), pinnedAt: p?.at ?? null, renewAt: p?.renewAt ?? null };
+  });
+  const known = new Set(channels.map(c => c.destination));
+  const unregistered = waGroups.filter(g => !known.has(g.id)).map(g => ({ id: g.id, name: g.name, admin: g.admins.length > 0 }));
+  return { groups, unregistered };
+}
+
 /** Descrição + mensagem fixada nos grupos informados (ou em todos os ativos). */
 export async function applyMainLink(userId: string, channelIds?: string[]): Promise<MainLinkResult[]> {
   const channels = await prisma.channel.findMany({ where: { userId, type: 'WHATSAPP_GROUP', ...(channelIds?.length ? { id: { in: channelIds } } : { enabled: true }) }, orderBy: { name: 'asc' } });

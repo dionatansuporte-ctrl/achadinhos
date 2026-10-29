@@ -27,7 +27,7 @@ import { encryptSecret } from './services/crypto';
 import { buildMercadoLivreAuthorizationUrl, exchangeMercadoLivreCode, pkcePair, refreshMercadoLivreToken, getMercadoLivreAccessToken } from './integrations/mercadolivre-oauth';
 import { renderOffer, defaultOfferTemplate, toggleOldPrice } from './services/offer';
 import { couponListMessage, parseValidUntil, isExpired, sendCouponList, productCoupons, pickCoupon, getSchedule, scheduleChannels, MARKETPLACES } from './services/coupons';
-import { applyMainLink, startMainLinkRenewal } from './services/group-link';
+import { applyMainLink, startMainLinkRenewal, mainLinkStatus } from './services/group-link';
 import { parseCouponText, importTelegramCoupons } from './services/coupon-import';
 import { extractMercadoLivreItemId, fetchMercadoLivreItem } from './services/mercadolivre';
 import { trendingKeywords } from './integrations/mercadolivre-search';
@@ -352,6 +352,25 @@ app.post('/api/products/import/amazon', requireAuth, asyncRoute(async(req:any,re
 app.get('/api/channels', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await prisma.channel.findMany({where:{userId:req.user.id},orderBy:{createdAt:'desc'}}))));
 // Link principal (cupons/ofertas da loja, com rastreio) na descrição dos grupos: todos os ativos ou só um.
 app.post('/api/channels/main-link', requireAuth, asyncRoute(async(req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json({results:await applyMainLink(req.user.id)}); }));
+// Quadro: grupos vinculados (loja + estado da fixada) e grupos do WhatsApp ainda não cadastrados como canal.
+app.get('/api/channels/main-link/status', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  let wa:any[]=[]; try{ wa=(await listGroups()).filter(g=>!(g.sessions?.length&&g.sessions.every(id=>id==='descartavel'))); }catch{ /* WhatsApp fora: mostra só os cadastrados */ }
+  res.json(await mainLinkStatus(req.user.id,wa));
+}));
+// Grupo recém-criado: cadastra como canal e já aplica o link principal nele.
+app.post('/api/channels/main-link/add', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({groups:z.array(z.object({id:z.string(),name:z.string()})).min(1)}).parse(req.body);
+  const ids:string[]=[];
+  for(const g of body.groups){
+    const c=await prisma.channel.findFirst({where:{userId:req.user.id,type:'WHATSAPP_GROUP',destination:g.id}})
+      ||await prisma.channel.create({data:{userId:req.user.id,type:'WHATSAPP_GROUP',name:g.name,destination:g.id}});
+    if(!c.enabled) await prisma.channel.update({where:{id:c.id},data:{enabled:true}});
+    ids.push(c.id);
+  }
+  res.json({results:await applyMainLink(req.user.id,ids)});
+}));
 app.post('/api/channels/:id/main-link', requireAuth, asyncRoute(async(req:any,res:any)=>{
   if(!requireAdmin(req,res))return;
   const [r]=await applyMainLink(req.user.id,[String(req.params.id)]);
