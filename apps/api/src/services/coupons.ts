@@ -54,18 +54,24 @@ export function couponLine(c: CouponLine) {
 
 /** Texto do listão de cupons de um marketplace. */
 export function couponListMessage(marketplace: Marketplace, coupons: CouponLine[], link?: string | null) {
+  // Mesmo estilo das ofertas (2026-10-28): curto, loja nomeada antes do link, aviso no rodapé.
+  const store = marketplaceName(marketplace);
   const lines = [
-    `🎟️ *CUPONS ${marketplaceName(marketplace).toUpperCase()}*`,
-    '',
-    ...(coupons.length ? coupons.map(couponLine) : [marketplace === 'SHOPEE' ? '💛 Resgate seu cupom 👇' : '💛 Veja os cupons do dia:']),
-    '',
-    // Sem cupom cadastrado a linha acima já aponta para o link; não repete a seta.
-    link && coupons.length ? '✅ Ative e compre por aqui:' : '',
+    `🎟️ *Cupons ${store}*`,
+    ...(coupons.length ? coupons.map(couponLine) : ['💛 Veja os cupons do dia 👇']),
+    link ? `🛒 *Resgatar: ${store}* 👇` : '',
     link || '',
     '',
     '⚠️ Cupons têm quantidade limitada e podem acabar antes do prazo.'
   ];
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Cartão do listão (formato das ofertas): sem foto própria, o robô busca a imagem da página do link. */
+export function couponListCard(marketplace: Marketplace, coupons: CouponLine[], link: string) {
+  const store = marketplaceName(marketplace);
+  const n = coupons.length;
+  return { url: link, title: `Cupons ${store}`, description: n ? `${n === 1 ? '1 cupom ativo' : `${n} cupons ativos`} · toque para resgatar` : 'Toque para ver os cupons do dia' };
 }
 
 /** Cupons válidos de um marketplace do usuário, na ordem de cadastro. */
@@ -143,8 +149,9 @@ export async function sendCouponList(sch: CouponSchedule, source: 'manual' | 'sc
   if (!channels.length) throw new Error(`Nenhum grupo de ${marketplaceName(sch.marketplace)}: marque os grupos na agenda do listão ou use-os numa automação ${marketplaceName(sch.marketplace)} ativa.`);
   const a = await couponAutomation(sch.userId);
   const text = couponListMessage(sch.marketplace, coupons, sch.link);
+  const card = sch.link ? couponListCard(sch.marketplace, coupons, sch.link) : undefined;
   for (const ch of channels) {
-    const job = await prisma.promotionJob.create({ data: { automationId: a.id, channelId: ch.id, scheduledAt: new Date(), payloadJson: { title: `Cupons ${marketplaceName(sch.marketplace)}`, text, affiliateUrl: sch.link || '' } } });
+    const job = await prisma.promotionJob.create({ data: { automationId: a.id, channelId: ch.id, scheduledAt: new Date(), payloadJson: { title: `Cupons ${marketplaceName(sch.marketplace)}`, text, affiliateUrl: sch.link || '', ...(card ? { card } : {}) } } });
   }
   await prisma.couponSchedule.update({ where: { id: sch.id }, data: { lastSentAt: new Date() } });
   await prisma.automationLog.create({ data: { automationId: a.id, action: 'RUN', status: 'OK', message: `Listão ${marketplaceName(sch.marketplace)} com ${coupons.length} cupom(ns) para ${channels.length} grupo(s)${source === 'manual' ? ', envio pelo botão' : ''}.` } });

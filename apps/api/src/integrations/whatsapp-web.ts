@@ -657,17 +657,21 @@ export async function sendWhatsAppWebCard(jid: string, text: string, card: WaCar
   const sock = via ? session(via).socket() : await sockFor(to);
   const body = text.includes(card.url) ? text : `${text.trimEnd()}\n${card.url}`;
   const preview: any = { 'canonical-url': card.url, 'matched-text': card.url, title: card.title, description: card.description || '' };
-  if (card.imageUrl && /^https?:\/\//i.test(card.imageUrl)) {
-    try {
-      const { prepareWAMessageMedia } = lib();
+  try {
+    const { prepareWAMessageMedia, getUrlInfo } = lib();
+    if (card.imageUrl && /^https?:\/\//i.test(card.imageUrl)) {
       const { imageMessage } = await prepareWAMessageMedia({ image: { url: card.imageUrl } }, { upload: sock.waUploadToServer, mediaTypeOverride: 'thumbnail-link', logger } as any);
       if (imageMessage) {
         preview.jpegThumbnail = imageMessage.jpegThumbnail ? Buffer.from(imageMessage.jpegThumbnail) : undefined;
         preview.highQualityThumbnail = imageMessage;
       }
-    } catch (e: any) {
-      session(via || await sessionForJid(to)).log(`Cartão sem foto (não consegui preparar a imagem): ${e?.message || e}`);
+    } else {
+      // Sem foto própria (listão de cupons): usa a imagem que a página do link anuncia, mantendo nosso título e descrição.
+      const info = await getUrlInfo(card.url, { thumbnailWidth: 192, fetchOpts: { timeout: 6000 }, uploadImage: sock.waUploadToServer, logger } as any);
+      if (info?.jpegThumbnail) { preview.jpegThumbnail = info.jpegThumbnail; preview.highQualityThumbnail = info.highQualityThumbnail; }
     }
+  } catch (e: any) {
+    session(via || await sessionForJid(to)).log(`Cartão sem foto (não consegui preparar a imagem): ${e?.message || e}`);
   }
   try {
     return await sock.sendMessage(to, { text: body, linkPreview: preview });
