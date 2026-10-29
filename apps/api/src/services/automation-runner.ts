@@ -217,7 +217,8 @@ async function runAutomationNow(automationId: string, opts: { source: 'manual' |
       oldPrice: p.oldPrice ? Number(p.oldPrice) : undefined,
       discountPercent: p.discountPercent || undefined,
       couponText: p.couponText || pickCoupon(coupons, p),
-      affiliateUrl: p.affiliateUrl
+      affiliateUrl: p.affiliateUrl,
+      marketplace: p.marketplace
     };
     const text = renderOffer(a.template || defaultOfferTemplate(), offer);
     const card = asCard ? offerCard(offer, p.imageUrl) : undefined;

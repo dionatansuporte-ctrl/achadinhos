@@ -5,7 +5,7 @@ import { createElement, Fragment } from 'react';
  * Prévia do template no navegador. Espelha o renderOffer da API com um produto
  * de exemplo, para o usuário ver a mensagem antes de salvar a automação.
  */
-const SAMPLE = { title: 'Fone Bluetooth JBL Tune 510BT', price: 89.9, oldPrice: 199.9, discountPercent: 55, couponText: 'FONE10', affiliateUrl: 'https://s.shopee.com.br/8AVpXJSkl6' };
+const SAMPLE = { title: 'Fone Bluetooth JBL Tune 510BT', price: 89.9, oldPrice: 199.9, discountPercent: 55, couponText: 'FONE10', store: 'Shopee', affiliateUrl: 'https://s.shopee.com.br/8AVpXJSkl6' };
 const brl = (n: number) => `R$ ${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /** Mesmo modelo padrão da API (services/offer.ts). Negrito no WhatsApp é UM asterisco. */
@@ -32,14 +32,17 @@ export const DEFAULT_CARD_TEMPLATE = [
   '💰 {{fromTo}}',
   '🏷️ {{discount}}',
   '🎟️ Cupom *{{coupon}}*',
-  '👉 {{affiliateUrl}}'
+  '🛒 *Comprar: {{store}}* 👇',
+  '{{affiliateUrl}}',
+  '',
+  '⚠️ As promoções são por tempo limitado e podem mudar a qualquer momento.'
 ].join('\n');
 
 export function renderOfferText(template: string, p = SAMPLE): string {
   const fromTo = p.oldPrice > p.price ? `De ~${brl(p.oldPrice)}~ por *${brl(p.price)}*` : `Por *${brl(p.price)}*`;
   const vars: Record<string, string> = {
     title: p.title, price: brl(p.price), oldPrice: brl(p.oldPrice), fromTo, dePor: fromTo,
-    discount: `${p.discountPercent}% OFF`, discountPercent: `${p.discountPercent}%`, coupon: p.couponText, affiliateUrl: p.affiliateUrl
+    discount: `${p.discountPercent}% OFF`, discountPercent: `${p.discountPercent}%`, coupon: p.couponText, store: p.store, affiliateUrl: p.affiliateUrl
   };
   const RE = /\{\{\s*(\w+)\s*\}\}/g;
   return template

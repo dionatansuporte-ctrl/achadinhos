@@ -5,7 +5,13 @@ type ProductOffer = {
   discountPercent?: number;
   couponText?: string;
   affiliateUrl: string;
+  marketplace?: string; // SHOPEE | MERCADO_LIVRE | AMAZON → {{store}}
 };
+
+/** Nome da loja para o texto ({{store}}): o cliente vê de onde é o link antes de clicar. */
+export function storeName(marketplace?: string | null) {
+  return marketplace === 'MERCADO_LIVRE' ? 'Mercado Livre' : marketplace === 'SHOPEE' ? 'Shopee' : marketplace === 'AMAZON' ? 'Amazon' : '';
+}
 
 // Padrão brasileiro: "R$ 1.299,90".
 const brl = (n: number) => `R$ ${n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -41,6 +47,7 @@ export function renderOffer(template: string, product: ProductOffer) {
     // Só o número, para frases como "{{discountPercent}} DE DESCONTO".
     discountPercent: discount ? discount.replace(/\s*OFF$/i, '') : "",
     coupon: product.couponText || "",
+    store: storeName(product.marketplace),
     affiliateUrl: product.affiliateUrl
   };
 
@@ -74,7 +81,10 @@ export function defaultCardTemplate() {
     "💰 {{fromTo}}",
     "🏷️ {{discount}}",
     "🎟️ Cupom *{{coupon}}*",
-    "👉 {{affiliateUrl}}"
+    "🛒 *Comprar: {{store}}* 👇",
+    "{{affiliateUrl}}",
+    "",
+    "⚠️ As promoções são por tempo limitado e podem mudar a qualquer momento."
   ].join("\n");
 }
 
