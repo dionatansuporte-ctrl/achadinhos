@@ -4,7 +4,6 @@ import { publishInstagramImage } from '../integrations/instagram';
 import { sendTelegramOffer } from '../integrations/telegram';
 import { shopeeTrackedLink } from '../integrations/shopee';
 import { isOfflineError } from '../queue';
-import { shortLink, isShortLink } from './short-link';
 
 /**
  * Grupos de WhatsApp saem pela sessão Baileys, que vive só no processo da API
@@ -45,17 +44,7 @@ export async function executePromotionJob(jobId:string){
       payload.trackedUrl=tracked;
     }
   }
-  // Link longo (Mercado Livre, Amazon) vira link curto na mensagem e no cartão; guardado no job para a retentativa usar o mesmo.
-  const longUrl=payload.trackedUrl||payload.affiliateUrl;
-  if(longUrl&&job.channel.type!=='INSTAGRAM'&&payload.text?.includes(longUrl)&&!isShortLink(longUrl)){
-    const short=payload.shortUrl||await shortLink(longUrl);
-    if(short!==longUrl){
-      payload.text=payload.text.split(longUrl).join(short);
-      if(payload.card?.url===longUrl) payload.card={...payload.card,url:short};
-      if(!payload.shortUrl) await prisma.promotionJob.update({where:{id:jobId},data:{payloadJson:{...(job.payloadJson as any),...(payload.trackedUrl?{trackedUrl:payload.trackedUrl}:{}),shortUrl:short}}}).catch(()=>{});
-      payload.shortUrl=short;
-    }
-  }
+  // Sem encurtador (2026-10-28): o usuário testou TinyURL e preferiu o link mostrando a loja (mercadolivre.com.br).
   try{
     if(job.channel.type==='WHATSAPP') await sendWhatsAppText(job.channel.destination,payload.text||'');
     else if(job.channel.type==='WHATSAPP_GROUP') await sendToWhatsAppGroup(job.channel.destination,payload.text||'',payload.imageUrl,jobId,payload.card);
