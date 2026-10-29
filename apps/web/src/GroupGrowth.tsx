@@ -19,6 +19,8 @@ export default function GroupGrowth({ inCard }: { inCard?: boolean }) {
   const [r, setR] = useState<Growth | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const LIMIT = 10;
 
   const load = () => {
     setLoading(true); setError('');
@@ -52,8 +54,9 @@ export default function GroupGrowth({ inCard }: { inCard?: boolean }) {
             </div>
           )}
 
+          {/* Só os 10 primeiros (o robô está em dezenas de grupos); o grupo escolhido sempre aparece. */}
           <div className="sales-list">
-            {r.groups.map(g => (
+            {(showAll ? r.groups : r.groups.filter((g, i) => i < LIMIT || g.id === groupId)).map(g => (
               <div className="sales-row" key={g.id} style={{ cursor: 'pointer', outline: g.id === groupId ? '2px solid var(--accent-border)' : undefined }} onClick={() => setGroupId(id => id === g.id ? '' : g.id)}>
                 <div className="sales-row-main">
                   <b>{g.name}</b>
@@ -63,6 +66,11 @@ export default function GroupGrowth({ inCard }: { inCard?: boolean }) {
               </div>
             ))}
           </div>
+          {r.groups.length > LIMIT && (
+            <button type="button" className="link-btn" style={{ marginTop: 6 }} onClick={() => setShowAll(v => !v)}>
+              {showAll ? `mostrar só os ${LIMIT} primeiros` : `mostrar todos os ${r.groups.length} grupos`}
+            </button>
+          )}
 
           {r.days.length > 1 && (
             <>
