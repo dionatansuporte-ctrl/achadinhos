@@ -4,18 +4,20 @@ import { publishInstagramImage } from '../integrations/instagram';
 import { sendTelegramOffer } from '../integrations/telegram';
 import { shopeeTrackedLink } from '../integrations/shopee';
 import { isOfflineError } from '../queue';
+import { shortLink, isShortLink } from './short-link';
 
 /**
  * Grupos de WhatsApp saem pela sessão Baileys, que vive só no processo da API
  * (uma sessão por número). O worker pede o envio pelo endpoint interno.
  */
-async function sendToWhatsAppGroup(jid: string, text: string, imageUrl: string | undefined, jobId: string) {
+async function sendToWhatsAppGroup(jid: string, text: string, imageUrl: string | undefined, jobId: string, card?: any) {
   const base = process.env.API_URL || 'http://localhost:3333';
   const r = await fetch(`${base}/internal/whatsapp/send`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-internal-secret': process.env.JWT_SECRET || '' },
     // jobId permite à API marcar o envio como entregue e recusar repetição do mesmo job.
-    body: JSON.stringify({ jid, text, imageUrl: imageUrl || undefined, jobId })
+    // card: formato "cartão com link" (foto embutida na pré-visualização) no lugar da foto com legenda.
+    body: JSON.stringify({ jid, text, imageUrl: imageUrl || undefined, jobId, card: card || undefined })
   });
   const data: any = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data?.error || 'Falha ao enviar para o grupo.');
@@ -38,13 +40,25 @@ export async function executePromotionJob(jobId:string){
     const tracked=payload.trackedUrl||await shopeeTrackedLink(job.product.productUrl,`g${job.channel.id}`);
     if(tracked){
       payload.text=payload.text.split(payload.affiliateUrl).join(tracked);
+      if(payload.card?.url===payload.affiliateUrl) payload.card={...payload.card,url:tracked}; // o cartão abre o mesmo link marcado
       if(!payload.trackedUrl) await prisma.promotionJob.update({where:{id:jobId},data:{payloadJson:{...(job.payloadJson as any),trackedUrl:tracked}}}).catch(()=>{});
       payload.trackedUrl=tracked;
     }
   }
+  // Link longo (Mercado Livre, Amazon) vira link curto na mensagem e no cartão; guardado no job para a retentativa usar o mesmo.
+  const longUrl=payload.trackedUrl||payload.affiliateUrl;
+  if(longUrl&&job.channel.type!=='INSTAGRAM'&&payload.text?.includes(longUrl)&&!isShortLink(longUrl)){
+    const short=payload.shortUrl||await shortLink(longUrl);
+    if(short!==longUrl){
+      payload.text=payload.text.split(longUrl).join(short);
+      if(payload.card?.url===longUrl) payload.card={...payload.card,url:short};
+      if(!payload.shortUrl) await prisma.promotionJob.update({where:{id:jobId},data:{payloadJson:{...(job.payloadJson as any),...(payload.trackedUrl?{trackedUrl:payload.trackedUrl}:{}),shortUrl:short}}}).catch(()=>{});
+      payload.shortUrl=short;
+    }
+  }
   try{
     if(job.channel.type==='WHATSAPP') await sendWhatsAppText(job.channel.destination,payload.text||'');
-    else if(job.channel.type==='WHATSAPP_GROUP') await sendToWhatsAppGroup(job.channel.destination,payload.text||'',payload.imageUrl,jobId);
+    else if(job.channel.type==='WHATSAPP_GROUP') await sendToWhatsAppGroup(job.channel.destination,payload.text||'',payload.imageUrl,jobId,payload.card);
     else if(job.channel.type==='TELEGRAM'){
       const r=await sendTelegramOffer(job.channel.destination,payload.text||'',payload.imageUrl);
       // Guarda o id da mensagem para a tela Telegram poder montar o link t.me/... do post.

@@ -1,6 +1,6 @@
 import { prisma } from '../db';
 import { TELEGRAM_AUTO } from '../integrations/telegram';
-import { renderOffer, defaultOfferTemplate } from './offer';
+import { renderOffer, defaultOfferTemplate, offerCard } from './offer';
 import { matchesRules } from './rules';
 import { productCoupons, pickCoupon } from './coupons';
 import { hasShopeeSearch, syncShopeeProducts, searchMarketplaceLabel, describeSearch } from './shopee-sync';
@@ -208,17 +208,21 @@ async function runAutomationNow(automationId: string, opts: { source: 'manual' |
   // Cupons cadastrados marcados "também nas mensagens de produto"; o cupom próprio do produto tem prioridade.
   const coupons = chosen.length ? await productCoupons(a.userId) : [];
   let jobs = 0;
+  // Formato "card" (2026-10-28): texto + cartão de link com a foto embutida (aparece no grupo sem baixar).
+  const asCard = rules.messageFormat === 'card';
   for (const p of chosen) {
-    const text = renderOffer(a.template || defaultOfferTemplate(), {
+    const offer = {
       title: p.title,
       price: p.price ? Number(p.price) : undefined,
       oldPrice: p.oldPrice ? Number(p.oldPrice) : undefined,
       discountPercent: p.discountPercent || undefined,
       couponText: p.couponText || pickCoupon(coupons, p),
       affiliateUrl: p.affiliateUrl
-    });
+    };
+    const text = renderOffer(a.template || defaultOfferTemplate(), offer);
+    const card = asCard ? offerCard(offer, p.imageUrl) : undefined;
     for (const c of forced.has(p) ? sentChannels(p) : pendingChannels(p)) {
-      const job = await prisma.promotionJob.create({ data: { automationId: a.id, productId: p.id, channelId: c.id, scheduledAt: new Date(), payloadJson: { title: p.title, text, affiliateUrl: p.affiliateUrl, imageUrl: p.imageUrl } } });
+      const job = await prisma.promotionJob.create({ data: { automationId: a.id, productId: p.id, channelId: c.id, scheduledAt: new Date(), payloadJson: { title: p.title, text, affiliateUrl: p.affiliateUrl, imageUrl: p.imageUrl, ...(card ? { card } : {}) } } });
       rememberSent(p, c.id, Infinity); // evita mandar o "mesmo" produto de novo nesta rodada
       jobs++;
     }

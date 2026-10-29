@@ -47,6 +47,37 @@ export function renderOffer(template: string, product: ProductOffer) {
   return fillTemplate(template, vars);
 }
 
+/** Cartão de pré-visualização do link (formato "card", 2026-10-28): foto embutida que aparece sem baixar. */
+export type OfferCard = { url: string; title: string; description: string; imageUrl?: string };
+
+/** Título e linha de preço do cartão: "De R$ 199,90 por R$ 89,90 · 55% OFF · Cupom: ABC". */
+export function offerCard(product: ProductOffer, imageUrl?: string | null): OfferCard {
+  // Curto de propósito: o cartão só mostra uma linha; o "de/por" completo já vai no texto.
+  const parts: string[] = [];
+  if (product.price != null) parts.push(brl(product.price));
+  const pct = product.discountPercent != null && product.discountPercent > 0
+    ? product.discountPercent
+    : product.oldPrice && product.price && product.oldPrice > product.price
+      ? Math.round((1 - product.price / product.oldPrice) * 100)
+      : 0;
+  if (pct) parts.push(`${pct}% OFF`);
+  return { url: product.affiliateUrl, title: product.title.slice(0, 120), description: parts.join(' · '), imageUrl: imageUrl || undefined };
+}
+
+/**
+ * Modelo padrão do formato cartão (pedido do usuário em 2026-10-28: a mensagem com cartão ficava poluída).
+ * Nome e foto já vão no cartão, então o texto fica só com preço, desconto, cupom e link.
+ */
+export function defaultCardTemplate() {
+  return [
+    "🔥 *Oferta do dia*",
+    "💰 {{fromTo}}",
+    "🏷️ {{discount}}",
+    "🎟️ Cupom *{{coupon}}*",
+    "👉 {{affiliateUrl}}"
+  ].join("\n");
+}
+
 export function fillTemplate(template: string, vars: Record<string, string>) {
   const RE = /\{\{\s*(\w+)\s*\}\}/g;
   return template

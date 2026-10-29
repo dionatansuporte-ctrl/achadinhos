@@ -43,7 +43,12 @@ export const DISPOSABLE_SESSION = 'descartavel';
 export const isDisposable = (id: string) => id === DISPOSABLE_SESSION;
 const BASE_DIR = path.resolve(process.cwd(), '.wa-auth');
 const authDir = (id: string) => id === MAIN_SESSION ? BASE_DIR : `${BASE_DIR}-${id}`;
-const logger = pino({ level: 'silent' });
+// Diagnóstico: com o arquivo `.wa-debug` ao lado da pasta da sessão, grava tudo que o Baileys manda e recebe
+// em logs/whatsapp-debug.log (fica grande rápido; apagar o arquivo-sinal depois de investigar).
+const DEBUG_FLAG = path.resolve(process.cwd(), '.wa-debug');
+const logger = fs.existsSync(DEBUG_FLAG)
+  ? pino({ level: 'trace' }, pino.destination({ dest: path.resolve(process.cwd(), '../../logs/whatsapp-debug.log'), sync: true }))
+  : pino({ level: 'silent' });
 
 /** Mensagem de texto recebida no privado (grupos, status e as próprias mensagens ficam de fora). */
 // text vazio = mensagem sem texto (áudio, foto, figurinha...); `media` diz o que era.
@@ -192,14 +197,15 @@ class WaSession {
   async setProfileName(name: string) {
     fs.mkdirSync(this.dir, { recursive: true });
     fs.writeFileSync(this.nameFile, name);
-    if (this.sock && this.status === 'connected') await this.applyProfileName();
+    if (this.sock && this.status === 'connected') await this.applyProfileName(true);
   }
 
-  async applyProfileName() {
+  /** `force`: pedido explícito da tela — reaplica mesmo que o nome pareça já ser esse (o celular pode ter ficado para trás). */
+  async applyProfileName(force = false) {
     const name = this.wantedName();
     const s = this.sock;
     if (!name || !s) return;
-    if (name !== this.me?.name) {
+    if (force || name !== this.me?.name) {
       await s.updateProfileName(name);
       if (this.me) this.me.name = name;
       this.log(`Nome do perfil agora é "${name}".`);
@@ -636,6 +642,38 @@ export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: 
     } catch { /* cai para texto puro */ }
   }
   return sock.sendMessage(to, { text });
+}
+
+export type WaCard = { url: string; title: string; description?: string; imageUrl?: string };
+
+/**
+ * Texto + cartão de pré-visualização do link (2026-10-28). Diferente da foto com legenda, a imagem vai embutida
+ * na própria mensagem (miniatura grande enviada ao servidor), então aparece no grupo na hora, sem "baixar",
+ * e o toque abre o link de afiliado. Se o link não estiver no texto, entra no fim (o WhatsApp exige).
+ * Falhou a imagem (CDN bloqueou, link expirou)? Sai o cartão só com título e descrição; falhou o cartão? Sai como foto.
+ */
+export async function sendWhatsAppWebCard(jid: string, text: string, card: WaCard, via?: string) {
+  const to = jid.includes('@') ? jid : `${jid.replace(/\D/g, '')}@s.whatsapp.net`;
+  const sock = via ? session(via).socket() : await sockFor(to);
+  const body = text.includes(card.url) ? text : `${text.trimEnd()}\n${card.url}`;
+  const preview: any = { 'canonical-url': card.url, 'matched-text': card.url, title: card.title, description: card.description || '' };
+  if (card.imageUrl && /^https?:\/\//i.test(card.imageUrl)) {
+    try {
+      const { prepareWAMessageMedia } = lib();
+      const { imageMessage } = await prepareWAMessageMedia({ image: { url: card.imageUrl } }, { upload: sock.waUploadToServer, mediaTypeOverride: 'thumbnail-link', logger } as any);
+      if (imageMessage) {
+        preview.jpegThumbnail = imageMessage.jpegThumbnail ? Buffer.from(imageMessage.jpegThumbnail) : undefined;
+        preview.highQualityThumbnail = imageMessage;
+      }
+    } catch (e: any) {
+      session(via || await sessionForJid(to)).log(`Cartão sem foto (não consegui preparar a imagem): ${e?.message || e}`);
+    }
+  }
+  try {
+    return await sock.sendMessage(to, { text: body, linkPreview: preview });
+  } catch {
+    return sendWhatsAppWebText(jid, text, card.imageUrl, via);
+  }
 }
 
 export type WaMember = { jid: string; phone: string | null; admin: boolean };

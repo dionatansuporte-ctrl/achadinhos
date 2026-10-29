@@ -26,6 +26,15 @@ export const DEFAULT_TEMPLATE = [
   '⚠️ As promoções são por tempo limitado e podem mudar a qualquer momento.'
 ].join('\n');
 
+/** Modelo padrão do formato "cartão com link" (mesmo da API): nome e foto já vão no cartão, o texto fica curto. */
+export const DEFAULT_CARD_TEMPLATE = [
+  '🔥 *Oferta do dia*',
+  '💰 {{fromTo}}',
+  '🏷️ {{discount}}',
+  '🎟️ Cupom *{{coupon}}*',
+  '👉 {{affiliateUrl}}'
+].join('\n');
+
 export function renderOfferText(template: string, p = SAMPLE): string {
   const fromTo = p.oldPrice > p.price ? `De ~${brl(p.oldPrice)}~ por *${brl(p.price)}*` : `Por *${brl(p.price)}*`;
   const vars: Record<string, string> = {

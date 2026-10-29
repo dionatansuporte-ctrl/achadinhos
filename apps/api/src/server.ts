@@ -19,7 +19,7 @@ import { titleKey } from './services/title-key';
 import { salesReport, clearSalesCache } from './services/reports';
 import { createBackup, listBackups, backupPath, deleteBackup, BACKUP_DIR } from './services/backup';
 import { startScheduler, describeSchedule } from './services/scheduler';
-import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, setWaProfileName, waGroupSessions, resolvePhoneJid, sendWhatsAppWebText, sessionForJid } from './integrations/whatsapp-web';
+import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, setWaProfileName, waGroupSessions, resolvePhoneJid, sendWhatsAppWebText, sendWhatsAppWebCard, sessionForJid } from './integrations/whatsapp-web';
 import { requireAuth } from './middleware/auth';
 import { hashPassword, verifyPassword, issueSession } from './services/auth';
 import { isMailConfigured, sendMail, sendPasswordResetCode } from './services/mailer';
@@ -1351,11 +1351,13 @@ app.post('/internal/whatsapp/send', asyncRoute(async(req:any,res:any)=>{
   // Comparação em tempo constante: com "!==" dá para descobrir o segredo medindo o tempo de resposta.
   const given=Buffer.from(String(req.headers['x-internal-secret']||'')), want=Buffer.from(process.env.JWT_SECRET||'');
   if(!want.length||given.length!==want.length||!crypto.timingSafeEqual(given,want)) return res.status(401).json({error:'Não autorizado.'});
-  const body=z.object({jid:z.string(),text:z.string(),imageUrl:httpUrl().optional(),jobId:z.string().optional()}).parse(req.body);
+  const body=z.object({jid:z.string(),text:z.string(),imageUrl:httpUrl().optional(),jobId:z.string().optional(),
+    card:z.object({url:z.string().url(),title:z.string(),description:z.string().default(''),imageUrl:httpUrl().optional()}).optional()}).parse(req.body);
   try{
     // Nova tentativa de um job já entregue (a resposta anterior ao worker se perdeu)? Não manda de novo.
     if(body.jobId){ const j=await prisma.promotionJob.findUnique({where:{id:body.jobId},select:{status:true}}); if(j?.status==='SENT') return res.json({ok:true,already:true}); }
-    await sendWhatsAppWebText(body.jid,body.text,body.imageUrl);
+    if(body.card) await sendWhatsAppWebCard(body.jid,body.text,body.card);
+    else await sendWhatsAppWebText(body.jid,body.text,body.imageUrl);
     // Marca entregue aqui, no mesmo processo que entregou: se a resposta se perder, a retentativa vê SENT.
     if(body.jobId) await prisma.promotionJob.update({where:{id:body.jobId},data:{status:'SENT',sentAt:new Date(),errorMessage:null}}).catch(()=>{});
     res.json({ok:true});
