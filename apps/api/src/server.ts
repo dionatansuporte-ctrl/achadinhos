@@ -27,6 +27,7 @@ import { encryptSecret } from './services/crypto';
 import { buildMercadoLivreAuthorizationUrl, exchangeMercadoLivreCode, pkcePair, refreshMercadoLivreToken, getMercadoLivreAccessToken } from './integrations/mercadolivre-oauth';
 import { renderOffer, defaultOfferTemplate, toggleOldPrice } from './services/offer';
 import { couponListMessage, parseValidUntil, isExpired, sendCouponList, productCoupons, pickCoupon, getSchedule, scheduleChannels, MARKETPLACES } from './services/coupons';
+import { applyMainLink } from './services/group-link';
 import { parseCouponText, importTelegramCoupons } from './services/coupon-import';
 import { extractMercadoLivreItemId, fetchMercadoLivreItem } from './services/mercadolivre';
 import { trendingKeywords } from './integrations/mercadolivre-search';
@@ -349,6 +350,14 @@ app.post('/api/products/import/amazon', requireAuth, asyncRoute(async(req:any,re
 }));
 
 app.get('/api/channels', requireAuth, asyncRoute(async(req:any,res:any)=>res.json(await prisma.channel.findMany({where:{userId:req.user.id},orderBy:{createdAt:'desc'}}))));
+// Link principal (cupons/ofertas da loja, com rastreio) na descrição dos grupos: todos os ativos ou só um.
+app.post('/api/channels/main-link', requireAuth, asyncRoute(async(req:any,res:any)=>{ if(!requireAdmin(req,res))return; res.json({results:await applyMainLink(req.user.id)}); }));
+app.post('/api/channels/:id/main-link', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const [r]=await applyMainLink(req.user.id,[String(req.params.id)]);
+  if(!r) return res.status(404).json({error:'Grupo não encontrado.'});
+  res.status(r.ok?200:409).json(r.ok?r:{...r,error:r.message});
+}));
 app.post('/api/channels', requireAuth, asyncRoute(async(req:any,res:any)=>{
   const body=z.object({type:z.enum(['WHATSAPP','WHATSAPP_GROUP','INSTAGRAM','TELEGRAM']),name:z.string().min(2),destination:z.string().min(2),configJson:z.any().optional()}).parse(req.body);
   res.status(201).json(await prisma.channel.create({data:{...body,userId:req.user.id}}));

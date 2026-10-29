@@ -290,6 +290,9 @@ class WaSession {
       logger,
       printQRInTerminal: false,
       browser: ['Robô das Ofertas', 'Chrome', '1.0'],
+      // Nome do perfil já no cadastro da conexão: sem ele, o servidor assinava as mensagens deste aparelho sem nome
+      // e os grupos mostravam só o id (2026-10-28).
+      pushName: this.wantedName() || undefined,
       syncFullHistory: false,
       markOnlineOnConnect: false
     });
@@ -696,6 +699,19 @@ export async function listGroupMembers(groupId: string, via?: string): Promise<{
     })
     .filter(m => m.phone !== myPhone);
   return { name: meta.subject || groupId, members };
+}
+
+/** Descrição atual do grupo (texto das informações do grupo); vazia se não tiver. */
+export async function getGroupDescription(groupId: string, via?: string): Promise<string> {
+  const s = await groupSession(groupId, via);
+  const meta = await s.socket().groupMetadata(groupId);
+  return meta.desc || '';
+}
+
+/** Troca a descrição do grupo (é preciso ser administrador dele). */
+export async function setGroupDescription(groupId: string, text: string, via?: string) {
+  const s = await groupSession(groupId, via);
+  await s.socket().groupUpdateDescription(groupId, text);
 }
 
 /** Link de convite do grupo (é preciso ser administrador dele). */
