@@ -27,7 +27,7 @@ import { encryptSecret } from './services/crypto';
 import { buildMercadoLivreAuthorizationUrl, exchangeMercadoLivreCode, pkcePair, refreshMercadoLivreToken, getMercadoLivreAccessToken } from './integrations/mercadolivre-oauth';
 import { renderOffer, defaultOfferTemplate, toggleOldPrice } from './services/offer';
 import { couponListMessage, parseValidUntil, isExpired, sendCouponList, productCoupons, pickCoupon, getSchedule, scheduleChannels, MARKETPLACES } from './services/coupons';
-import { applyMainLink } from './services/group-link';
+import { applyMainLink, startMainLinkRenewal } from './services/group-link';
 import { parseCouponText, importTelegramCoupons } from './services/coupon-import';
 import { extractMercadoLivreItemId, fetchMercadoLivreItem } from './services/mercadolivre';
 import { trendingKeywords } from './integrations/mercadolivre-search';
@@ -1436,7 +1436,7 @@ app.post('/api/integrations/mercadolivre/refresh', requireAuth, asyncRoute(async
 app.use((err:any,_req:any,res:any,_next:any)=>{ console.error(err); res.status(err?.name==='ZodError'?400:500).json({error:err?.message||'Erro interno.'}); });
 
 const HOST=process.env.HOST||'127.0.0.1';
-app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); startGroupGrowth(); startGroupGuard(); startTelegramContacts(); tgAccount.connectSavedAccount().catch(()=>{}); connectSavedSessions(); startScheduler(); });
+app.listen(Number(process.env.PORT||3333),HOST,()=>{ console.log('Robô das Ofertas API em http://localhost:3333'); warmUpCategories(); startCustomerBot(); startGroupGrowth(); startGroupGuard(); startTelegramContacts(); tgAccount.connectSavedAccount().catch(()=>{}); connectSavedSessions(); startScheduler(); startMainLinkRenewal(); });
 
 // HTTPS local (porta 3443): o Mercado Livre só aceita URL de retorno do OAuth em HTTPS.
 // Certificado autoassinado gerado uma vez e guardado em apps/api/certs/ (fora do git).

@@ -701,11 +701,17 @@ export async function listGroupMembers(groupId: string, via?: string): Promise<{
   return { name: meta.subject || groupId, members };
 }
 
-/** Descrição atual do grupo (texto das informações do grupo); vazia se não tiver. */
-export async function getGroupDescription(groupId: string, via?: string): Promise<string> {
+/** Descrição atual do grupo e prazo das mensagens temporárias (segundos; 0 = desligado). */
+export async function getGroupInfo(groupId: string, via?: string): Promise<{ desc: string; ephemeral: number }> {
   const s = await groupSession(groupId, via);
   const meta = await s.socket().groupMetadata(groupId);
-  return meta.desc || '';
+  return { desc: meta.desc || '', ephemeral: Number(meta.ephemeralDuration || 0) };
+}
+
+/** Fixa (ou solta) uma mensagem no topo do grupo. Prazos aceitos pelo WhatsApp: 1 dia, 7 dias ou 30 dias. */
+export async function pinGroupMessage(groupId: string, key: any, seconds: 86400 | 604800 | 2592000, unpin = false, via?: string) {
+  const s = await groupSession(groupId, via);
+  await s.socket().sendMessage(groupId, { pin: key, type: unpin ? 2 : 1, time: seconds } as any);
 }
 
 /** Troca a descrição do grupo (é preciso ser administrador dele). */
