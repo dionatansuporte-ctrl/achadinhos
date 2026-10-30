@@ -75,7 +75,7 @@ export type MainLinkStatus = {
 
 /** Quadro da tela Canais: cada grupo com a loja e o estado da fixada, e os grupos ainda não cadastrados. */
 export async function mainLinkStatus(userId: string, waGroups: { id: string; name: string; admins: string[] }[]): Promise<MainLinkStatus> {
-  const channels = await prisma.channel.findMany({ where: { userId, type: 'WHATSAPP_GROUP' }, orderBy: { name: 'asc' } });
+  const channels = await prisma.channel.findMany({ where: { userId, type: 'WHATSAPP_GROUP', destination: { endsWith: '@g.us' } }, orderBy: { name: 'asc' } });
   const links = await linksByChannel(userId);
   const groups = channels.map(c => {
     const p = (c.configJson as any)?.mainLinkPin as PinState | undefined;
@@ -88,7 +88,7 @@ export async function mainLinkStatus(userId: string, waGroups: { id: string; nam
 
 /** Descrição + mensagem fixada nos grupos informados (ou em todos os ativos). */
 export async function applyMainLink(userId: string, channelIds?: string[]): Promise<MainLinkResult[]> {
-  const channels = await prisma.channel.findMany({ where: { userId, type: 'WHATSAPP_GROUP', ...(channelIds?.length ? { id: { in: channelIds } } : { enabled: true }) }, orderBy: { name: 'asc' } });
+  const channels = await prisma.channel.findMany({ where: { userId, type: 'WHATSAPP_GROUP', destination: { endsWith: '@g.us' }, ...(channelIds?.length ? { id: { in: channelIds } } : { enabled: true }) }, orderBy: { name: 'asc' } });
   const links = await linksByChannel(userId);
   const results: MainLinkResult[] = [];
   for (const c of channels) {
@@ -131,7 +131,7 @@ async function pinLinks(c: { id: string; destination: string; configJson: any },
 export function startMainLinkRenewal() {
   const tick = async () => {
     if (!anyWaConnected()) return;
-    const channels = await prisma.channel.findMany({ where: { type: 'WHATSAPP_GROUP', enabled: true } });
+    const channels = await prisma.channel.findMany({ where: { type: 'WHATSAPP_GROUP', enabled: true, destination: { endsWith: '@g.us' } } });
     const due = channels.filter(c => { const p = (c.configJson as any)?.mainLinkPin as PinState | undefined; return p && Date.now() >= p.renewAt; });
     for (const c of due) {
       const [r] = await applyMainLink(c.userId, [c.id]);

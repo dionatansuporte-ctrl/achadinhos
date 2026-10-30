@@ -1,5 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import dns from 'node:dns/promises';
+import net from 'node:net';
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { readJson, writeJsonAtomic } from '../services/json-file';
@@ -592,6 +594,49 @@ export async function listGroups(): Promise<WaGroup[]> {
   return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
 }
 
+/**
+ * Canais do WhatsApp (pedido do usuário em 2026-10-29): aqueles de seguidores, endereço "...@newsletter".
+ * O WhatsApp não deixa listar os canais da conta, então o canal entra pelo link (whatsapp.com/channel/CODIGO).
+ * Só o dono ou um administrador publica: procura, entre os números conectados, um que seja dono/admin, e grava
+ * esse número como o que manda para o canal (mesmo mapa do privado, que fica em disco e é o que sessionForJid lê).
+ */
+export type WaChannel = { id: string; name: string; description: string; followers: number; invite: string | null; role: string; session: string | null; canPost: boolean };
+const channelCode = (input: string) => {
+  const s = input.trim();
+  if (/@newsletter$/.test(s)) return { type: 'jid', key: s };
+  const m = /channel\/([A-Za-z0-9_-]{10,})/.exec(s);
+  if (m) return { type: 'invite', key: m[1] };
+  if (/^[A-Za-z0-9_-]{10,}$/.test(s)) return { type: 'invite', key: s };
+  return null;
+};
+export async function findWaChannel(input: string): Promise<WaChannel> {
+  const code = channelCode(input);
+  if (!code) throw new Error('Não reconheci esse link. Copie o link do canal no WhatsApp (abra o canal → nome do canal → Encaminhar link / Copiar link). Ele fica assim: https://whatsapp.com/channel/0029Va...');
+  const connected = service().filter(s => s.status === 'connected');
+  if (!connected.length) throw new Error(NOT_CONNECTED);
+  let found: WaChannel | null = null;
+  let lastError = '';
+  for (const s of connected) {
+    try {
+      const meta: any = await s.socket().newsletterMetadata(code.type as any, code.key);
+      if (!meta?.id) continue;
+      const t = meta.thread_metadata || {};
+      const role = String(meta.viewer_metadata?.role || 'GUEST').toUpperCase();
+      const canPost = role === 'OWNER' || role === 'ADMIN';
+      const ch: WaChannel = {
+        id: meta.id, name: t.name?.text || 'Canal do WhatsApp', description: t.description?.text || '',
+        followers: Number(t.subscribers_count) || 0, invite: t.invite || (code.type === 'invite' ? code.key : null),
+        role, session: canPost ? s.id : null, canPost
+      };
+      if (canPost) { found = ch; break; }
+      found ||= ch;
+    } catch (e: any) { lastError = e?.message || String(e); }
+  }
+  if (!found) throw new Error(`Não encontrei esse canal no WhatsApp${lastError ? ` (${lastError})` : ''}. Confira se o link está certo e se o canal ainda existe.`);
+  if (found.session) rememberContact(found.id, found.session);
+  return found;
+}
+
 /** Número que deve cuidar do grupo: o escolhido (via) — que precisa estar conectado — ou o que sessionForJid achar. */
 async function groupSession(groupId: string, via?: string) {
   if (!via) return session(await sessionForJid(groupId));
@@ -649,6 +694,35 @@ export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: 
 
 export type WaCard = { url: string; title: string; description?: string; imageUrl?: string };
 
+// Endereços que não são da internet (o próprio PC, a rede de casa/empresa, a nuvem por dentro).
+const PRIVATE = new net.BlockList();
+for (const [a, p] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16], ['224.0.0.0', 3]] as const) PRIVATE.addSubnet(a, p, 'ipv4');
+for (const [a, p] of [['::', 127], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8]] as const) PRIVATE.addSubnet(a, p, 'ipv6');
+const isPrivateIp = (ip: string) => {
+  const v4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip)?.[1];
+  return v4 ? PRIVATE.check(v4, 'ipv4') : PRIVATE.check(ip, net.isIPv6(ip) ? 'ipv6' : 'ipv4');
+};
+/**
+ * Segurança (2026-10-29, falha de SSRF da link-preview-js ≤ 4.0.3): antes de buscar a página de um link para montar
+ * a prévia, confere que o endereço é da internet. Assim um link malicioso (cupom importado do Telegram, por exemplo)
+ * não faz o robô abrir páginas internas do PC ou da rede.
+ * A opção resolveDNSHost da própria biblioteca não serve: ela só aceita o IP e abre o site por ele, e site com https
+ * recusa. Por isso a checagem é feita aqui, antes, e o aviso que a biblioteca imprime a cada prévia é silenciado.
+ */
+async function publicUrlOnly(url: string): Promise<string> {
+  const u = new URL(url);
+  if (!/^https?:$/.test(u.protocol)) throw new Error('Link com protocolo não permitido.');
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  const ips = net.isIP(host) ? [host] : (await dns.lookup(host, { all: true })).map(r => r.address);
+  if (!ips.length || ips.some(isPrivateIp)) throw new Error('Link aponta para um endereço interno; prévia bloqueada por segurança.');
+  return url;
+}
+const consoleError = console.error.bind(console);
+console.error = (...args: any[]) => {
+  if (typeof args[0] === 'string' && args[0].startsWith('[link-preview-js] You are not resolving DNS')) return;
+  consoleError(...args);
+};
+
 /**
  * Texto + cartão de pré-visualização do link (2026-10-28). Diferente da foto com legenda, a imagem vai embutida
  * na própria mensagem (miniatura grande enviada ao servidor), então aparece no grupo na hora, sem "baixar",
@@ -663,15 +737,18 @@ export async function sendWhatsAppWebCard(jid: string, text: string, card: WaCar
   try {
     const { prepareWAMessageMedia, getUrlInfo } = lib();
     if (card.imageUrl && /^https?:\/\//i.test(card.imageUrl)) {
-      const { imageMessage } = await prepareWAMessageMedia({ image: { url: card.imageUrl } }, { upload: sock.waUploadToServer, mediaTypeOverride: 'thumbnail-link', logger } as any);
+      // jid: em canal do WhatsApp (@newsletter) a foto sobe sem criptografia; a biblioteca só faz isso sabendo o destino.
+      const { imageMessage } = await prepareWAMessageMedia({ image: { url: card.imageUrl } }, { upload: sock.waUploadToServer, mediaTypeOverride: 'thumbnail-link', logger, jid: to } as any);
       if (imageMessage) {
         preview.jpegThumbnail = imageMessage.jpegThumbnail ? Buffer.from(imageMessage.jpegThumbnail) : undefined;
         preview.highQualityThumbnail = imageMessage;
       }
     } else {
       // Sem foto própria (listão de cupons): usa a imagem que a página do link anuncia, mantendo nosso título e descrição.
+      await publicUrlOnly(card.url);
       const info = await getUrlInfo(card.url, { thumbnailWidth: 192, fetchOpts: { timeout: 6000 }, uploadImage: sock.waUploadToServer, logger } as any);
-      if (info?.jpegThumbnail) { preview.jpegThumbnail = info.jpegThumbnail; preview.highQualityThumbnail = info.highQualityThumbnail; }
+      // A imagem grande daqui sobe criptografada, que o canal do WhatsApp não aceita: lá vai só a miniatura.
+      if (info?.jpegThumbnail) { preview.jpegThumbnail = info.jpegThumbnail; if (!to.endsWith('@newsletter')) preview.highQualityThumbnail = info.highQualityThumbnail; }
     }
   } catch (e: any) {
     session(via || await sessionForJid(to)).log(`Cartão sem foto (não consegui preparar a imagem): ${e?.message || e}`);

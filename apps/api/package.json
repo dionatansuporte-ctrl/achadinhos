@@ -16,7 +16,7 @@
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
-    "link-preview-js": "^3.2.0",
+    "link-preview-js": "^4.0.4",
     "node-cron": "^4.2.1",
     "nodemailer": "^10.0.13",
     "pino": "^10.3.1",
@@ -43,5 +43,9 @@
     "esbuild@0.28.2": true,
     "msgpackr-extract@3.0.4": true,
     "protobufjs@7.6.6": true
+  },
+  "overrides": {
+    "link-preview-js": "$link-preview-js",
+    "deepmerge-ts": "^8.0.2"
   }
 }

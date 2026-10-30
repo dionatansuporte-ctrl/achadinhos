@@ -19,7 +19,7 @@ import { titleKey } from './services/title-key';
 import { salesReport, clearSalesCache } from './services/reports';
 import { createBackup, listBackups, backupPath, deleteBackup, BACKUP_DIR } from './services/backup';
 import { startScheduler, describeSchedule } from './services/scheduler';
-import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, setWaProfileName, waGroupSessions, resolvePhoneJid, sendWhatsAppWebText, sendWhatsAppWebCard, sessionForJid } from './integrations/whatsapp-web';
+import { addGroupMembers, addWaSession, anyWaConnected, connectSavedSessions, connectWhatsAppWeb, findWaChannel, getWaState, groupInviteLink, listGroupMembers, listGroups, listWaSessions, logoutWhatsAppWeb, setWaProfileName, waGroupSessions, resolvePhoneJid, sendWhatsAppWebText, sendWhatsAppWebCard, sessionForJid } from './integrations/whatsapp-web';
 import { requireAuth } from './middleware/auth';
 import { hashPassword, verifyPassword, issueSession } from './services/auth';
 import { isMailConfigured, sendMail, sendPasswordResetCode } from './services/mailer';
@@ -647,6 +647,43 @@ app.post('/api/whatsapp/logout', requireAuth, asyncRoute(async(req:any,res:any)=
 
 app.get('/api/whatsapp/groups', requireAuth, asyncRoute(async(_req:any,res:any)=>{
   try{ res.json(await listGroups()); }catch(e:any){ res.status(409).json({error:e.message}); }
+}));
+
+// ---------- Canais do WhatsApp (pedido do usuário em 2026-10-29): os de seguidores, endereço ...@newsletter ----------
+// Viram um canal WHATSAPP_GROUP comum (a fila, as automações e o histórico já tratam), com configJson.waChannel.
+// O WhatsApp não lista os canais da conta: entram pelo link. Só o dono/admin do canal publica.
+const waChannelFields=(ch:Awaited<ReturnType<typeof findWaChannel>>)=>({waChannel:true,invite:ch.invite,followers:ch.followers,role:ch.role,session:ch.session,checkedAt:Date.now()});
+app.get('/api/whatsapp/news-channels', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  res.json(await prisma.channel.findMany({where:{userId:req.user.id,type:'WHATSAPP_GROUP',destination:{endsWith:'@newsletter'}},orderBy:{createdAt:'desc'}}));
+}));
+app.post('/api/whatsapp/news-channels/lookup', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  const body=z.object({link:z.string().trim().min(5).max(500)}).parse(req.body);
+  try{ res.json(await findWaChannel(body.link)); }catch(e:any){ res.status(409).json({error:e.message}); }
+}));
+app.post('/api/whatsapp/news-channels', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const body=z.object({link:z.string().trim().min(5).max(500)}).parse(req.body);
+  let ch; try{ ch=await findWaChannel(body.link); }catch(e:any){ return res.status(409).json({error:e.message}); }
+  if(!ch.canPost) return res.status(409).json({error:`Encontrei o canal "${ch.name}", mas nenhum número conectado é dono ou administrador dele, então o robô não consegue publicar. Conecte em Canais o número dono do canal, ou adicione o número do robô como administrador do canal (no canal: nome do canal → Administradores → Convidar).`});
+  const have=await prisma.channel.findFirst({where:{userId:req.user.id,type:'WHATSAPP_GROUP',destination:ch.id}});
+  const configJson={...((have?.configJson as any)||{}),...waChannelFields(ch)};
+  const saved=have
+    ? await prisma.channel.update({where:{id:have.id},data:{enabled:true,name:ch.name,configJson}})
+    : await prisma.channel.create({data:{userId:req.user.id,type:'WHATSAPP_GROUP',name:ch.name,destination:ch.id,configJson}});
+  res.status(have?200:201).json({channel:saved,info:ch,created:!have});
+}));
+// Confere de novo o canal (seguidores, quem publica) e manda uma mensagem de teste.
+app.post('/api/whatsapp/news-channels/:id/test', requireAuth, asyncRoute(async(req:any,res:any)=>{
+  if(!requireAdmin(req,res))return;
+  const c=await prisma.channel.findFirst({where:{id:String(req.params.id),userId:req.user.id,destination:{endsWith:'@newsletter'}}});
+  if(!c) return res.status(404).json({error:'Canal não encontrado.'});
+  try{
+    const ch=await findWaChannel(c.destination);
+    await prisma.channel.update({where:{id:c.id},data:{name:ch.name,configJson:{...((c.configJson as any)||{}),...waChannelFields(ch)}}});
+    if(!ch.canPost) return res.status(409).json({error:'Nenhum número conectado é dono ou administrador deste canal agora, então não deu para publicar.'});
+    await sendWhatsAppWebText(c.destination,'✅ Teste do Robô das Ofertas: este canal está pronto para receber as ofertas!',undefined,ch.session||undefined);
+    res.json({ok:true,info:ch});
+  }catch(e:any){ res.status(409).json({error:'Desculpe, o teste não saiu: '+(e?.message||e)}); }
 }));
 
 // Quantas pessoas entraram/saíram de cada grupo no período (hoje, ontem, 7 ou 30 dias); groupId filtra o dia a dia.
