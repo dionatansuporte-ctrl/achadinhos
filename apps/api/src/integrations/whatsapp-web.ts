@@ -618,8 +618,10 @@ export async function findWaChannel(input: string): Promise<WaChannel> {
   let lastError = '';
   for (const s of connected) {
     try {
-      const meta: any = await s.socket().newsletterMetadata(code.type as any, code.key);
+      let meta: any = await s.socket().newsletterMetadata(code.type as any, code.key);
       if (!meta?.id) continue;
+      // Pelo link de convite o WhatsApp não diz o papel de quem consulta (viewer_metadata vem vazio); pelo endereço do canal diz.
+      if (!meta.viewer_metadata && code.type !== 'jid') meta = (await s.socket().newsletterMetadata('jid' as any, meta.id).catch(() => null)) || meta;
       const t = meta.thread_metadata || {};
       const role = String(meta.viewer_metadata?.role || 'GUEST').toUpperCase();
       const canPost = role === 'OWNER' || role === 'ADMIN';
@@ -686,10 +688,40 @@ export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: 
     // Foto do produto com o texto como legenda. Se a imagem falhar (link expirado,
     // bloqueio da CDN), a oferta ainda sai em texto.
     try {
-      return await sock.sendMessage(to, { image: { url: imageUrl }, caption: text });
+      return await sendChecked(sock, to, { image: { url: imageUrl }, caption: text });
     } catch { /* cai para texto puro */ }
   }
-  return sock.sendMessage(to, { text });
+  return sendChecked(sock, to, { text });
+}
+
+/**
+ * Canal do WhatsApp (@newsletter, 2026-10-30): a Baileys manda sem esperar resposta, então uma recusa do servidor
+ * (ex.: erro 479, mensagem fora do formato) passava como "enviado". Aqui espera a confirmação e, se vier erro, falha.
+ */
+async function sendChecked(sock: any, to: string, content: any) {
+  if (!to.endsWith('@newsletter')) return sock.sendMessage(to, content);
+  let done: (err?: string) => void = () => {};
+  const acked = new Promise<string | undefined>(r => { done = r; });
+  const ids = new Set<string>();
+  const early = new Map<string, string | undefined>();
+  const onAck = (node: any) => {
+    const a = node?.attrs || {};
+    if (a.from !== to) return;
+    if (ids.has(a.id)) done(a.error); else early.set(a.id, a.error);
+  };
+  sock.ws.on('CB:ack,class:message', onAck);
+  try {
+    const sent = await sock.sendMessage(to, content);
+    const id = sent?.key?.id;
+    if (!id) return sent;
+    ids.add(id);
+    if (early.has(id)) done(early.get(id));
+    const err = await Promise.race([acked, new Promise<string | undefined>(r => setTimeout(() => r(undefined), 10_000))]);
+    if (err) throw new Error(`O WhatsApp recusou a mensagem no canal (erro ${err}).`);
+    return sent;
+  } finally {
+    sock.ws.off('CB:ack,class:message', onAck);
+  }
 }
 
 export type WaCard = { url: string; title: string; description?: string; imageUrl?: string };
@@ -733,6 +765,15 @@ export async function sendWhatsAppWebCard(jid: string, text: string, card: WaCar
   const to = jid.includes('@') ? jid : `${jid.replace(/\D/g, '')}@s.whatsapp.net`;
   const sock = via ? session(via).socket() : await sockFor(to);
   const body = text.includes(card.url) ? text : `${text.trimEnd()}\n${card.url}`;
+  // Canal do WhatsApp (@newsletter, 2026-10-30): o cartão só mostra uma miniatura pequena e a foto grande ele recusa
+  // (erro 479). Lá a oferta vai como foto do produto com o texto na legenda, que o canal mostra em tamanho cheio.
+  if (to.endsWith('@newsletter') && card.imageUrl && /^https?:\/\//i.test(card.imageUrl)) {
+    try {
+      return await sendChecked(sock, to, { image: { url: card.imageUrl }, caption: body });
+    } catch (e: any) {
+      session(via || await sessionForJid(to)).log(`Foto não saiu em ${to}, vai como cartão: ${e?.message || e}`);
+    }
+  }
   const preview: any = { 'canonical-url': card.url, 'matched-text': card.url, title: card.title, description: card.description || '' };
   try {
     const { prepareWAMessageMedia, getUrlInfo } = lib();
@@ -741,7 +782,8 @@ export async function sendWhatsAppWebCard(jid: string, text: string, card: WaCar
       const { imageMessage } = await prepareWAMessageMedia({ image: { url: card.imageUrl } }, { upload: sock.waUploadToServer, mediaTypeOverride: 'thumbnail-link', logger, jid: to } as any);
       if (imageMessage) {
         preview.jpegThumbnail = imageMessage.jpegThumbnail ? Buffer.from(imageMessage.jpegThumbnail) : undefined;
-        preview.highQualityThumbnail = imageMessage;
+        // Canal do WhatsApp recusa o cartão com a foto grande (erro 479, 2026-10-30); o listão, só com a miniatura, passava.
+        if (!to.endsWith('@newsletter')) preview.highQualityThumbnail = imageMessage;
       }
     } else {
       // Sem foto própria (listão de cupons): usa a imagem que a página do link anuncia, mantendo nosso título e descrição.
@@ -754,8 +796,9 @@ export async function sendWhatsAppWebCard(jid: string, text: string, card: WaCar
     session(via || await sessionForJid(to)).log(`Cartão sem foto (não consegui preparar a imagem): ${e?.message || e}`);
   }
   try {
-    return await sock.sendMessage(to, { text: body, linkPreview: preview });
-  } catch {
+    return await sendChecked(sock, to, { text: body, linkPreview: preview });
+  } catch (e: any) {
+    session(via || await sessionForJid(to)).log(`Cartão não saiu em ${to}, vai como foto: ${e?.message || e}`);
     return sendWhatsAppWebText(jid, text, card.imageUrl, via);
   }
 }
