@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import crypto from 'node:crypto';
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { readJson, writeJsonAtomic } from '../services/json-file';
@@ -688,8 +689,9 @@ export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: 
     // Foto do produto com o texto como legenda. Se a imagem falhar (link expirado,
     // bloqueio da CDN), a oferta ainda sai em texto.
     try {
-      return await sendChecked(sock, to, { image: { url: imageUrl }, caption: text });
-    } catch { /* cai para texto puro */ }
+      if (to.endsWith('@newsletter')) return await sendChecked(sock, to, () => sendNewsletterImage(sock, to, imageUrl, text));
+      return await sock.sendMessage(to, { image: { url: imageUrl }, caption: text });
+    } catch (e: any) { session(via || await sessionForJid(to)).log(`Foto não saiu em ${to}, vai só o texto: ${e?.message || e}`); }
   }
   return sendChecked(sock, to, { text });
 }
@@ -698,8 +700,9 @@ export async function sendWhatsAppWebText(jid: string, text: string, imageUrl?: 
  * Canal do WhatsApp (@newsletter, 2026-10-30): a Baileys manda sem esperar resposta, então uma recusa do servidor
  * (ex.: erro 479, mensagem fora do formato) passava como "enviado". Aqui espera a confirmação e, se vier erro, falha.
  */
-async function sendChecked(sock: any, to: string, content: any) {
-  if (!to.endsWith('@newsletter')) return sock.sendMessage(to, content);
+async function sendChecked(sock: any, to: string, content: any | (() => Promise<any>)) {
+  const send = () => (typeof content === 'function' ? content() : sock.sendMessage(to, content));
+  if (!to.endsWith('@newsletter')) return send();
   let done: (err?: string) => void = () => {};
   const acked = new Promise<string | undefined>(r => { done = r; });
   const ids = new Set<string>();
@@ -711,7 +714,7 @@ async function sendChecked(sock: any, to: string, content: any) {
   };
   sock.ws.on('CB:ack,class:message', onAck);
   try {
-    const sent = await sock.sendMessage(to, content);
+    const sent = await send();
     const id = sent?.key?.id;
     if (!id) return sent;
     ids.add(id);
@@ -722,6 +725,46 @@ async function sendChecked(sock: any, to: string, content: any) {
   } finally {
     sock.ws.off('CB:ack,class:message', onAck);
   }
+}
+
+/**
+ * Foto com legenda em canal do WhatsApp (@newsletter, 2026-10-30). A Baileys 7.0.0-rc14 sobe a foto do canal no
+ * endereço dos grupos (/mms/image) e põe "url" na mensagem; o canal recusa com erro 479 (correção aberta na
+ * biblioteca, PR #2434, ainda não publicada). Aqui a foto sobe no endereço próprio do canal, sem criptografia,
+ * e a mensagem vai só com o caminho direto, como o WhatsApp Web faz.
+ */
+async function sendNewsletterImage(sock: any, to: string, imageUrl: string, caption: string) {
+  const { proto, generateMessageIDV2, encodeBase64EncodedStringForUpload } = lib() as any;
+  const res = await fetch(imageUrl, { signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new Error(`a foto não baixou (HTTP ${res.status})`);
+  const data = Buffer.from(await res.arrayBuffer());
+  const mimetype = (res.headers.get('content-type') || '').split(';')[0].trim() || 'image/jpeg';
+  const sha = crypto.createHash('sha256').update(data).digest();
+  const token = encodeBase64EncodedStringForUpload(sha.toString('base64'));
+  const conn = await sock.refreshMediaConn(false);
+  let up: any = null, lastErr = '';
+  for (const { hostname } of conn.hosts || []) {
+    const url = `https://${hostname}/newsletter/newsletter-image/${token}?auth=${encodeURIComponent(conn.auth)}&token=${token}&server_thumb_gen=1`;
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', Origin: 'https://web.whatsapp.com' }, body: data, signal: AbortSignal.timeout(60_000) });
+      const j: any = await r.json().catch(() => null);
+      if (r.ok && j?.direct_path) { up = j; break; }
+      lastErr = `HTTP ${r.status} ${JSON.stringify(j)}`.slice(0, 200);
+    } catch (e: any) { lastErr = e?.message || String(e); }
+  }
+  if (!up) throw new Error(`a foto não subiu para o canal: ${lastErr}`);
+  const message = proto.Message.fromObject({ imageMessage: {
+    directPath: up.direct_path, fileSha256: sha, fileLength: data.length, mimetype, caption,
+    thumbnailDirectPath: up.thumbnail_info?.thumbnail_direct_path || undefined,
+    thumbnailSha256: up.thumbnail_info?.thumbnail_sha256 ? Buffer.from(up.thumbnail_info.thumbnail_sha256, 'base64') : undefined
+  } });
+  const id = generateMessageIDV2(sock.user?.id);
+  await sock.sendNode({
+    tag: 'message',
+    attrs: { to, id, type: 'media', ...(up.handle ? { media_id: String(up.handle) } : {}) },
+    content: [{ tag: 'plaintext', attrs: { mediatype: 'image' }, content: proto.Message.encode(message).finish() }]
+  });
+  return { key: { remoteJid: to, fromMe: true, id }, message };
 }
 
 export type WaCard = { url: string; title: string; description?: string; imageUrl?: string };
@@ -769,7 +812,7 @@ export async function sendWhatsAppWebCard(jid: string, text: string, card: WaCar
   // (erro 479). Lá a oferta vai como foto do produto com o texto na legenda, que o canal mostra em tamanho cheio.
   if (to.endsWith('@newsletter') && card.imageUrl && /^https?:\/\//i.test(card.imageUrl)) {
     try {
-      return await sendChecked(sock, to, { image: { url: card.imageUrl }, caption: body });
+      return await sendChecked(sock, to, () => sendNewsletterImage(sock, to, card.imageUrl!, body));
     } catch (e: any) {
       session(via || await sessionForJid(to)).log(`Foto não saiu em ${to}, vai como cartão: ${e?.message || e}`);
     }
