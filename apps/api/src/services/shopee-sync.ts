@@ -25,6 +25,7 @@ export type ShopeeSearchRule = {
   limit?: number;
   minDiscount?: number;           // repassado ao ML para filtrar já na API
   keywordCursor?: number;         // nº da rodada (o robô informa): escolhe o bloco de termos do rodízio
+  windowLimit?: number;           // interno: "produtos por rodada" da regra original, para o rodízio não encolher quando a rodada é dividida entre lojas
   shopeeExclude?: number[];       // categorias de nível 1 da Shopee que a automação não envia (marcadas no "Testar busca")
   termFilter?: boolean;          // false = não filtra o resultado pelo assunto do termo (o atendimento ao cliente tem o seu)
 };
@@ -41,7 +42,9 @@ export function keywordWindowSize(count: number, limit: number): number {
  */
 export function keywordWindow(rule: ShopeeSearchRule): { terms: string[]; size: number; total: number } {
   const all = ruleKeywords(rule);
-  const size = keywordWindowSize(all.length, rule.limit || 10);
+  // Com várias lojas, cada uma recebe uma parte dos produtos (limit menor), mas o bloco de termos da rodada
+  // é o da regra original (windowLimit): antes o log dizia "7 termos" e cada loja buscava só 4.
+  const size = keywordWindowSize(all.length, rule.windowLimit || rule.limit || 10);
   if (all.length <= size) return { terms: all, size, total: all.length };
   const round = Math.max(0, Math.floor(Number(rule.keywordCursor) || 0));
   const start = (round * size) % all.length;
@@ -81,7 +84,7 @@ export const searchMarketplaceLabel = (rule: ShopeeSearchRule) => ruleMarketplac
 /** Regra restrita a um marketplace só (sem categoria quando a original misturava lojas, pois o ID é de cada loja). */
 function ruleFor(rule: ShopeeSearchRule, marketplace: SearchMarketplace, limit: number): ShopeeSearchRule {
   const mixed = ruleMarketplaces(rule).length > 1;
-  return { ...rule, marketplace, marketplaces: undefined, limit, categoryId: mixed ? undefined : rule.categoryId };
+  return { ...rule, marketplace, marketplaces: undefined, limit, windowLimit: rule.windowLimit || rule.limit, categoryId: mixed ? undefined : rule.categoryId };
 }
 
 /** Intercala listas (1º de cada, depois 2º de cada...) sem repetir item, até `limit`. */

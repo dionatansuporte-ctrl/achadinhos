@@ -33,5 +33,36 @@ export function titleSimilarity(a: string[], b: string[]): number {
   return inter / (a.length + b.length - inter);
 }
 
-/** Acima disso, dois títulos são considerados o mesmo produto. */
-export const TITLE_SIMILAR_MIN = 0.8;
+/**
+ * A partir disso, dois títulos são o mesmo modelo (mesmo produto em outro anúncio ou variação).
+ * Era 0,8, mas "Armário Star 3 Nichos ... Preto" x "... Cedro" dá 0,75 e "Pulseira Gcm Silicone
+ * Magnético Deployant Mostarda" x "... Fecho Magnético Silicone Branco" dá 0,60: mesmo modelo, outra cor.
+ * Modelos parecidos mas diferentes (8bitdo Ultimate 2C x Ultimate C) ficam em 0,45.
+ */
+export const TITLE_SIMILAR_MIN = 0.6;
+
+/** Primeira palavra útil do título na ordem original: em anúncio brasileiro costuma ser o produto ("Filamento", "Controle", "Mochila"). */
+export function titleHead(title: string | null | undefined): string {
+  return String(title || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/\p{M}+/gu, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(' ')
+    .find(w => w.length >= 3 && !STOP.has(w)) || '';
+}
+
+/**
+ * Parte das palavras do título menor que também está no outro (0 = nada em comum, 1 = um contém o outro).
+ * Mais solto que o Jaccard: serve para dizer se dois produtos são "do mesmo tipo" (dois filamentos,
+ * duas centrais multimídia), não se são o mesmo modelo.
+ */
+export function titleOverlap(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const sb = new Set(b);
+  let inter = 0;
+  for (const w of a) if (sb.has(w)) inter++;
+  return inter / Math.min(a.length, b.length);
+}
+
+/** A partir disso, dois títulos são o mesmo tipo de produto (a automação evita mandá-los em sequência). */
+export const KIND_SIMILAR_MIN = 0.4;
